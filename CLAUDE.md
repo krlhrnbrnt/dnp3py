@@ -35,7 +35,7 @@ uv run pytest tests/ -v                     # all tests, verbose
 uv run pytest tests/unit/ -v                # unit tests only
 uv run pytest tests/integration/ -v         # integration tests only
 uv run pytest tests/ --cov=src/dnp3 --cov-report=html --cov-fail-under=95   # coverage (HTML report)
-uv run nox                                  # multi-Python matrix via nox (uv backend)
+for v in 3.11 3.12 3.13 3.14; do uv run --python $v pytest tests/; done   # all supported Pythons
 uv run --python 3.11 pytest tests/ -v       # test against specific Python version
 ```
 
@@ -127,6 +127,5 @@ Note: This is an open source library. CI uses GitHub hosted runners (ubuntu-late
 - `pyproject.toml`: project metadata, dev dependency group, tool config, coverage thresholds
 - `uv.lock`: locked dev environment (commit changes alongside pyproject.toml)
 - `.python-version`: default Python for `uv sync` (3.14)
-- `noxfile.py`: multi-Python test sessions
 - `.pre-commit-config.yaml`: pre-commit hook definitions
 - `src/dnp3/__init__.py`: version string

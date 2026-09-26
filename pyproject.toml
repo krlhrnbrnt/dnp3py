@@ -38,7 +38,6 @@ dev = [
     "hypothesis>=6.0",
     "mypy>=1.8",
     "ruff==0.15.18",
-    "nox>=2024.0",
     "pre-commit>=4.0",
 ]
 
@@ -93,7 +92,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.bandit]
-exclude_dirs = ["tests", ".venv", ".nox"]
+exclude_dirs = ["tests", ".venv"]
 skips = []
 
 [tool.coverage.run]

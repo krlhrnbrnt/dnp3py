@@ -230,10 +230,9 @@ uv run mypy src/
 
 # Test with specific Python version
 uv run --python 3.11 pytest tests/
-uv run --python 3.12 pytest tests/
 
-# Test all Python versions (via nox)
-uv run nox
+# Test all supported Python versions
+for v in 3.11 3.12 3.13 3.14; do uv run --python $v pytest tests/; done
 ```
 
 ### Project Structure
