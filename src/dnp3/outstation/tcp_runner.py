@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from dnp3.application.header import ApplicationControl
-from dnp3.core.enums import LinkFunctionCode
+from dnp3.application.fragment import ResponseFragment
+from dnp3.application.header import REQUEST_HEADER_SIZE, ApplicationControl
+from dnp3.core.enums import FunctionCode, LinkFunctionCode
 from dnp3.datalink.builder import build_ack, build_link_status, build_unconfirmed_user_data
+from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
 from dnp3.outstation.outstation import Outstation
 from dnp3.outstation.peer import PeerId
 from dnp3.transport.reassembler import Reassembler
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport.segmenter import Segmenter
-from dnp3.transport_io.channel import ChannelClosedError, ChannelError
-from dnp3.transport_io.tcp_server import TcpServer, TcpServerChannel, serve
+from dnp3.transport_io.channel import Channel, ChannelClosedError, ChannelError
+from dnp3.transport_io.tcp_server import TcpServer, serve
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,32 @@ def _outer_cancellation_pending() -> bool:
     return task is not None and task.cancelling() > 0
 
 
+async def _answer_link_frame(channel: Channel, frame: DataLinkFrame, master_addr: int, outstation_addr: int) -> bool:
+    """Send the link-layer reply a primary frame calls for.
+
+    Replies follow the primary-to-secondary pairing in IEEE 1815-2012 Clause 9.2.4:
+    REQUEST_LINK_STATUS gets LINK_STATUS; RESET_LINK_STATES, TEST_LINK_STATES and
+    CONFIRMED_USER_DATA get ACK. UNCONFIRMED_USER_DATA expects no reply. Any other
+    primary code is dropped without a reply.
+
+    Returns:
+        True if the frame carries user data for the transport layer, False if
+        it was fully handled here or is unsupported and should be skipped.
+    """
+    fc = frame.header.control.function_code
+    if fc == LinkFunctionCode.PRI_REQUEST_LINK_STATUS:
+        await channel.write_all(build_link_status(master_addr, outstation_addr, False).to_bytes())
+        return False
+    if fc in (
+        LinkFunctionCode.PRI_RESET_LINK_STATE,
+        LinkFunctionCode.PRI_TEST_LINK_STATE,
+        LinkFunctionCode.PRI_CONFIRMED_USER_DATA,
+    ):
+        await channel.write_all(build_ack(master_addr, outstation_addr, False).to_bytes())
+        return fc == LinkFunctionCode.PRI_CONFIRMED_USER_DATA
+    return fc == LinkFunctionCode.PRI_UNCONFIRMED_USER_DATA
+
+
 @dataclass
 class OutstationTcpRunner:
     """Runs an outstation over TCP, handling full protocol stack."""
@@ -43,7 +72,7 @@ class OutstationTcpRunner:
 
     _server: TcpServer | None = field(default=None, init=False, repr=False)
     _shutdown: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    _connection_task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    _connection_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     # Counts accepted connections so PeerId(source, connection) tells apart
     # two masters sharing one source address on separate connections (#72).
     _connection_counter: int = field(default=0, init=False, repr=False)
@@ -134,13 +163,8 @@ class OutstationTcpRunner:
         if self._server is not None:
             await self._server.stop()
 
-    async def _handle_connection(self, channel: TcpServerChannel | object) -> None:
-        """Handle a single client connection through the full protocol stack.
-
-        Args:
-            channel: A channel with read/write_all/close async methods.
-                     Typically TcpServerChannel, but can be SimulatorChannel for testing.
-        """
+    async def _handle_connection(self, channel: Channel) -> None:
+        """Handle a single client connection through the full protocol stack."""
         parser = FrameParser()
         # Bound the reassembler to the outstation's configured fragment cap so a
         # never-FIN transport stream cannot exhaust process memory.
@@ -156,7 +180,7 @@ class OutstationTcpRunner:
 
         try:
             while not self._shutdown.is_set():
-                data = await channel.read(4096)  # type: ignore[union-attr]
+                data = await channel.read(4096)
                 if not data:
                     break  # EOF
 
@@ -175,88 +199,19 @@ class OutstationTcpRunner:
                     if not frame.header.control.prm:
                         continue
 
-                    fc = frame.header.control.function_code
-
-                    # Link-layer management
-                    if fc == LinkFunctionCode.PRI_RESET_LINK_STATE:
-                        ack = build_ack(effective_master, outstation_addr, False)
-                        await channel.write_all(ack.to_bytes())  # type: ignore[union-attr]
-                        continue
-
-                    if fc == LinkFunctionCode.PRI_REQUEST_LINK_STATUS:
-                        status = build_link_status(effective_master, outstation_addr, False)
-                        await channel.write_all(status.to_bytes())  # type: ignore[union-attr]
-                        continue
-
-                    if fc == LinkFunctionCode.PRI_TEST_LINK_STATE:
-                        ack = build_ack(effective_master, outstation_addr, False)
-                        await channel.write_all(ack.to_bytes())  # type: ignore[union-attr]
-                        continue
-
-                    if fc == LinkFunctionCode.PRI_CONFIRMED_USER_DATA:
-                        # ACK the confirmed data
-                        ack = build_ack(effective_master, outstation_addr, False)
-                        await channel.write_all(ack.to_bytes())  # type: ignore[union-attr]
-                        # Fall through to process user data
-                    elif fc == LinkFunctionCode.PRI_UNCONFIRMED_USER_DATA:
-                        pass  # Fall through to process user data
-                    else:
-                        continue  # Unsupported function code
-
-                    # Extract transport segment from user data
-                    if not frame.user_data:
+                    has_user_data = await _answer_link_frame(channel, frame, effective_master, outstation_addr)
+                    if not has_user_data or not frame.user_data:
                         continue
 
                     segment = TransportSegment.from_bytes(frame.user_data)
                     result = reassembler.add(segment)
 
                     if result is not None:
-                        # Complete application fragment received
                         peer = PeerId(source=frame.header.source, connection=conn_id)
                         responses = self.outstation.process_request(result.data, peer=peer)
-                        is_multi = len(responses) > 1
-
-                        for i, response in enumerate(responses):
-                            is_last_fragment = i == len(responses) - 1
-
-                            # For non-final fragments in multi-fragment responses,
-                            # set the CON bit to request application-layer confirm
-                            if is_multi and not is_last_fragment:
-                                resp_bytes = bytearray(response.to_bytes())
-                                resp_bytes[0] |= 0x20  # Set CON bit (bit 5)
-                                resp_bytes = bytes(resp_bytes)
-                            else:
-                                resp_bytes = response.to_bytes()
-
-                            segments = segmenter.segment(resp_bytes)
-
-                            for seg in segments:
-                                resp_frame = build_unconfirmed_user_data(
-                                    destination=effective_master,
-                                    source=outstation_addr,
-                                    dir_from_master=False,
-                                    user_data=seg.to_bytes(),
-                                )
-                                await channel.write_all(resp_frame.to_bytes())  # type: ignore[union-attr]
-
-                            # Wait for APPLICATION_CONFIRM before sending next fragment
-                            if is_multi and not is_last_fragment:
-                                confirm_received = await self._wait_for_confirm(
-                                    channel,
-                                    parser,
-                                    reassembler,
-                                    outstation_addr,
-                                    effective_master,
-                                    expected_seq=response.sequence,
-                                    timeout=self.outstation.config.confirm_timeout,
-                                )
-                                if not confirm_received:
-                                    logger.warning(
-                                        "Timed out waiting for application confirm after fragment %d of %d",
-                                        i + 1,
-                                        len(responses),
-                                    )
-                                    break
+                        await self._send_responses(
+                            channel, parser, segmenter, responses, effective_master, outstation_addr
+                        )
         except (ChannelClosedError, asyncio.CancelledError):
             pass
         except ChannelError as exc:
@@ -266,17 +221,58 @@ class OutstationTcpRunner:
         except Exception:
             logger.exception("Error handling connection")
         finally:
-            try:
-                await channel.close()  # type: ignore[union-attr]
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                await channel.close()
             logger.info("Connection closed")
+
+    async def _send_responses(
+        self,
+        channel: Channel,
+        parser: FrameParser,
+        segmenter: Segmenter,
+        responses: list[ResponseFragment],
+        master_addr: int,
+        outstation_addr: int,
+    ) -> None:
+        """Send response fragments, awaiting an application confirm after each non-final one."""
+        for i, response in enumerate(responses):
+            needs_confirm = i < len(responses) - 1
+
+            resp_bytes = response.to_bytes()
+            if needs_confirm:
+                control = replace(ApplicationControl.from_byte(resp_bytes[0]), con=True)
+                resp_bytes = control.to_bytes() + resp_bytes[1:]
+
+            for seg in segmenter.segment(resp_bytes):
+                resp_frame = build_unconfirmed_user_data(
+                    destination=master_addr,
+                    source=outstation_addr,
+                    dir_from_master=False,
+                    user_data=seg.to_bytes(),
+                )
+                await channel.write_all(resp_frame.to_bytes())
+
+            if needs_confirm:
+                confirm_received = await self._wait_for_confirm(
+                    channel,
+                    parser,
+                    outstation_addr,
+                    master_addr,
+                    expected_seq=response.sequence,
+                    timeout=self.outstation.config.confirm_timeout,
+                )
+                if not confirm_received:
+                    logger.warning(
+                        "Timed out waiting for application confirm after fragment %d of %d",
+                        i + 1,
+                        len(responses),
+                    )
+                    return
 
     async def _wait_for_confirm(
         self,
-        channel: TcpServerChannel | object,
+        channel: Channel,
         parser: FrameParser,
-        reassembler: Reassembler,
         outstation_addr: int,
         master_addr: int,
         *,
@@ -292,7 +288,6 @@ class OutstationTcpRunner:
         Args:
             channel: Communication channel.
             parser: Frame parser instance.
-            reassembler: Transport reassembler (a fresh one is used internally).
             outstation_addr: This outstation's address.
             master_addr: The master's address.
             expected_seq: Application sequence number of the fragment being
@@ -316,7 +311,7 @@ class OutstationTcpRunner:
 
             try:
                 data = await asyncio.wait_for(
-                    channel.read(4096),  # type: ignore[union-attr]
+                    channel.read(4096),
                     timeout=remaining,
                 )
             except TimeoutError:
@@ -331,53 +326,29 @@ class OutstationTcpRunner:
                 if not frame.header.control.prm:
                     continue
 
-                fc = frame.header.control.function_code
-
-                # Handle link-layer management frames that might arrive
-                if fc == LinkFunctionCode.PRI_RESET_LINK_STATE:
-                    ack = build_ack(master_addr, outstation_addr, False)
-                    await channel.write_all(ack.to_bytes())  # type: ignore[union-attr]
-                    continue
-
-                if fc == LinkFunctionCode.PRI_REQUEST_LINK_STATUS:
-                    status = build_link_status(master_addr, outstation_addr, False)
-                    await channel.write_all(status.to_bytes())  # type: ignore[union-attr]
-                    continue
-
-                if fc == LinkFunctionCode.PRI_TEST_LINK_STATE:
-                    ack = build_ack(master_addr, outstation_addr, False)
-                    await channel.write_all(ack.to_bytes())  # type: ignore[union-attr]
-                    continue
-
-                if fc == LinkFunctionCode.PRI_CONFIRMED_USER_DATA:
-                    ack = build_ack(master_addr, outstation_addr, False)
-                    await channel.write_all(ack.to_bytes())  # type: ignore[union-attr]
-                    # Fall through to process user data
-                elif fc == LinkFunctionCode.PRI_UNCONFIRMED_USER_DATA:
-                    pass  # Fall through to process user data
-                else:
-                    continue
-
-                if not frame.user_data:
+                has_user_data = await _answer_link_frame(channel, frame, master_addr, outstation_addr)
+                if not has_user_data or not frame.user_data:
                     continue
 
                 segment = TransportSegment.from_bytes(frame.user_data)
                 result = confirm_reassembler.add(segment)
 
-                if result is not None and len(result.data) >= 2:
-                    # Check function code (second byte of application data)
-                    func_code = result.data[1]
-                    if func_code == 0x00:  # FunctionCode.CONFIRM
-                        confirm_seq = ApplicationControl.from_byte(result.data[0]).seq
-                        if confirm_seq == expected_seq:
-                            return True
-                        # A conformant master won't send this; guard against a
-                        # stale/duplicate CONFIRM retransmitted on the same
-                        # connection prematurely advancing the fragment loop.
-                        logger.warning(
-                            "Discarding CONFIRM with sequence %d, expected %d",
-                            confirm_seq,
-                            expected_seq,
-                        )
+                # A request header is the control byte followed by the function code.
+                if (
+                    result is not None
+                    and len(result.data) >= REQUEST_HEADER_SIZE
+                    and result.data[1] == FunctionCode.CONFIRM
+                ):
+                    confirm_seq = ApplicationControl.from_byte(result.data[0]).seq
+                    if confirm_seq == expected_seq:
+                        return True
+                    # A conformant master won't send this; guard against a
+                    # stale/duplicate CONFIRM retransmitted on the same
+                    # connection prematurely advancing the fragment loop.
+                    logger.warning(
+                        "Discarding CONFIRM with sequence %d, expected %d",
+                        confirm_seq,
+                        expected_seq,
+                    )
 
         return False

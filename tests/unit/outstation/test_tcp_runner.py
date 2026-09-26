@@ -6,6 +6,7 @@ directly with SimulatorChannel pairs, bypassing real TCP.
 
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -22,13 +23,15 @@ from dnp3.database import (
 )
 from dnp3.datalink.builder import (
     build_confirmed_user_data,
+    build_primary_frame,
     build_request_link_status,
     build_reset_link_state,
+    build_test_link_state,
     build_unconfirmed_user_data,
 )
 from dnp3.datalink.parser import FrameParser
 from dnp3.outstation import Outstation, OutstationConfig
-from dnp3.outstation.tcp_runner import OutstationTcpRunner
+from dnp3.outstation.tcp_runner import OutstationTcpRunner, _answer_link_frame
 from dnp3.transport.reassembler import Reassembler
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
@@ -427,6 +430,8 @@ def _build_confirm_frame(
     seq: int,
     master_addr: int,
     outstation_addr: int,
+    *,
+    link_confirmed: bool = False,
 ) -> bytes:
     """Build a complete datalink frame containing an APPLICATION_CONFIRM.
 
@@ -437,10 +442,15 @@ def _build_confirm_frame(
     ac = ApplicationControl(fir=True, fin=True, con=False, uns=False, seq=seq)
     confirm_bytes = bytes([ac.to_byte(), FunctionCode.CONFIRM])
     segment = TransportSegment.build(fir=True, fin=True, seq=0, payload=confirm_bytes)
-    frame = build_unconfirmed_user_data(
+    frame = build_primary_frame(
         destination=outstation_addr,
         source=master_addr,
+        function_code=(
+            LinkFunctionCode.PRI_CONFIRMED_USER_DATA if link_confirmed else LinkFunctionCode.PRI_UNCONFIRMED_USER_DATA
+        ),
         dir_from_master=True,
+        fcb=link_confirmed,
+        fcv=link_confirmed,
         user_data=segment.to_bytes(),
     )
     return frame.to_bytes()
@@ -503,6 +513,39 @@ async def _reassemble_fragment(
     return None, None
 
 
+@contextlib.asynccontextmanager
+async def _awaiting_first_confirm() -> AsyncIterator[tuple[SimulatorChannel, ApplicationControl]]:
+    """Run a multi-fragment integrity poll up to the first fragment's confirm wait.
+
+    Yields the master channel and the first fragment's application control.
+    """
+    config = OutstationConfig(
+        address=OUTSTATION_ADDR,
+        master_address=MASTER_ADDR,
+        max_fragment_size=249,
+        confirm_timeout=2.0,
+    )
+    runner = _make_runner(Outstation(config=config, database=_build_large_database(num_analog=500)))
+    master_ch, outstation_ch = create_channel_pair()
+    await master_ch.open()
+    await outstation_ch.open()
+
+    request = build_integrity_poll(seq=0)
+    await master_ch.write_all(_build_request_frame(MASTER_ADDR, OUTSTATION_ADDR, request.to_bytes()))
+    task = asyncio.create_task(runner._handle_connection(outstation_ch))
+    try:
+        frag_data, ac = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+        assert frag_data is not None, "Expected first fragment"
+        assert ac.con, "First fragment should have CON bit"
+        yield master_ch, ac
+    finally:
+        await master_ch.close()
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
 class TestMultiFragmentResponse:
     """Test multi-fragment response protocol with APPLICATION_CONFIRM handshake."""
 
@@ -548,115 +591,45 @@ class TestMultiFragmentResponse:
         3. Send fragment 2 (and so on)
         4. Final fragment has FIN=1, CON=0
         """
-        database = _build_large_database(num_analog=500)
-        config = OutstationConfig(
-            address=OUTSTATION_ADDR,
-            master_address=MASTER_ADDR,
-            max_fragment_size=249,  # Force many fragments
-        )
-        outstation = Outstation(config=config, database=database)
-        runner = _make_runner(outstation)
-        master_ch, outstation_ch = create_channel_pair()
-        await master_ch.open()
-        await outstation_ch.open()
+        async with _awaiting_first_confirm() as (master_ch, first):
+            assert first.fir, "First fragment should have FIR"
+            assert not first.fin, "First fragment should NOT have FIN (multi-fragment)"
+            fragments_received = [first]
 
-        request = build_integrity_poll(seq=0)
-        frame_bytes = _build_request_frame(MASTER_ADDR, OUTSTATION_ADDR, request.to_bytes())
-        await master_ch.write_all(frame_bytes)
+            # Send APPLICATION_CONFIRM matching the sequence
+            await master_ch.write_all(_build_confirm_frame(first.seq, MASTER_ADDR, OUTSTATION_ADDR))
 
-        task = asyncio.create_task(runner._handle_connection(outstation_ch))
+            # Read remaining fragments, confirming each non-final one
+            for _ in range(50):  # safety limit
+                frag_data, ac = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+                if frag_data is None:
+                    break
+                fragments_received.append(ac)
 
-        fragments_received = []
-        reassembler = Reassembler()
+                if ac.fin:
+                    # Final fragment should NOT have CON
+                    assert not ac.con, "Final fragment should not request confirm"
+                    break
 
-        # Read first fragment - should have FIR=1, FIN=0, CON=1
-        frag_data, ac = await _reassemble_fragment(master_ch, reassembler, timeout=3.0)
-        assert frag_data is not None, "Expected first fragment"
-        assert ac.fir, "First fragment should have FIR"
-        assert not ac.fin, "First fragment should NOT have FIN (multi-fragment)"
-        assert ac.con, "First fragment should have CON bit set to request confirm"
-        fragments_received.append((frag_data, ac))
+                # Non-final fragment should have CON
+                assert ac.con, "Non-final fragment should have CON bit"
+                assert not ac.fir, "Middle fragments should not have FIR"
 
-        # Send APPLICATION_CONFIRM matching the sequence
-        confirm_frame = _build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR)
-        await master_ch.write_all(confirm_frame)
+                # Send confirm for this fragment
+                await master_ch.write_all(_build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR))
 
-        # Read remaining fragments, confirming each non-final one
-        for _ in range(50):  # safety limit
-            reassembler_next = Reassembler()
-            frag_data, ac = await _reassemble_fragment(
-                master_ch,
-                reassembler_next,
-                timeout=3.0,
-            )
-            if frag_data is None:
-                break
-            fragments_received.append((frag_data, ac))
-
-            if ac.fin:
-                # Final fragment should NOT have CON
-                assert not ac.con, "Final fragment should not request confirm"
-                break
-
-            # Non-final fragment should have CON
-            assert ac.con, "Non-final fragment should have CON bit"
-            assert not ac.fir, "Middle fragments should not have FIR"
-
-            # Send confirm for this fragment
-            confirm_frame = _build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR)
-            await master_ch.write_all(confirm_frame)
-
-        assert len(fragments_received) >= 2, f"Expected multiple fragments, got {len(fragments_received)}"
-        # First fragment: FIR=1, FIN=0
-        assert fragments_received[0][1].fir
-        assert not fragments_received[0][1].fin
-        # Last fragment: FIR=0, FIN=1
-        assert not fragments_received[-1][1].fir
-        assert fragments_received[-1][1].fin
-
-        await master_ch.close()
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+            assert len(fragments_received) >= 2, f"Expected multiple fragments, got {len(fragments_received)}"
+            # Last fragment: FIR=0, FIN=1
+            assert not fragments_received[-1].fir
+            assert fragments_received[-1].fin
 
     @pytest.mark.asyncio
     async def test_multi_fragment_timeout_on_no_confirm(self) -> None:
         """If master doesn't send confirm, outstation stops after timeout."""
-        database = _build_large_database(num_analog=500)
-        config = OutstationConfig(
-            address=OUTSTATION_ADDR,
-            master_address=MASTER_ADDR,
-            max_fragment_size=249,
-        )
-        outstation = Outstation(config=config, database=database)
-        runner = _make_runner(outstation)
-        master_ch, outstation_ch = create_channel_pair()
-        await master_ch.open()
-        await outstation_ch.open()
-
-        request = build_integrity_poll(seq=0)
-        frame_bytes = _build_request_frame(MASTER_ADDR, OUTSTATION_ADDR, request.to_bytes())
-        await master_ch.write_all(frame_bytes)
-
-        task = asyncio.create_task(runner._handle_connection(outstation_ch))
-
-        # Read first fragment
-        reassembler = Reassembler()
-        frag_data, ac = await _reassemble_fragment(master_ch, reassembler, timeout=3.0)
-        assert frag_data is not None, "Expected first fragment"
-        assert ac.con, "First fragment should have CON bit"
-
-        # Do NOT send confirm - wait and verify no more fragments arrive
-        reassembler2 = Reassembler()
-        frag_data2, _ac2 = await _reassemble_fragment(master_ch, reassembler2, timeout=3.0)
-        assert frag_data2 is None, "Should not receive second fragment without confirming first"
-
-        await master_ch.close()
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+        async with _awaiting_first_confirm() as (master_ch, _ac):
+            # Do NOT send confirm - wait and verify no more fragments arrive
+            frag_data2, _ac2 = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+            assert frag_data2 is None, "Should not receive second fragment without confirming first"
 
     @pytest.mark.asyncio
     async def test_mismatched_confirm_does_not_advance_fragment(self) -> None:
@@ -666,55 +639,21 @@ class TestMultiFragmentResponse:
         outstation to the next fragment. The correctly-sequenced CONFIRM,
         sent afterward, must still work.
         """
-        database = _build_large_database(num_analog=500)
-        config = OutstationConfig(
-            address=OUTSTATION_ADDR,
-            master_address=MASTER_ADDR,
-            max_fragment_size=249,
-            confirm_timeout=2.0,
-        )
-        outstation = Outstation(config=config, database=database)
-        runner = _make_runner(outstation)
-        master_ch, outstation_ch = create_channel_pair()
-        await master_ch.open()
-        await outstation_ch.open()
+        async with _awaiting_first_confirm() as (master_ch, ac):
+            # Send a CONFIRM with the wrong sequence number (stale/duplicate).
+            wrong_seq = (ac.seq + 1) % 16
+            await master_ch.write_all(_build_confirm_frame(wrong_seq, MASTER_ADDR, OUTSTATION_ADDR))
 
-        request = build_integrity_poll(seq=0)
-        frame_bytes = _build_request_frame(MASTER_ADDR, OUTSTATION_ADDR, request.to_bytes())
-        await master_ch.write_all(frame_bytes)
+            # It must be discarded: no second fragment shows up on a short read.
+            frag_data_stale, _ = await _reassemble_fragment(master_ch, Reassembler(), timeout=0.5)
+            assert frag_data_stale is None, "Mismatched-sequence CONFIRM must not advance the fragment"
 
-        task = asyncio.create_task(runner._handle_connection(outstation_ch))
+            # The correctly-sequenced CONFIRM still works within the same wait window.
+            await master_ch.write_all(_build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR))
 
-        # Read first fragment - note its sequence number.
-        reassembler = Reassembler()
-        frag_data, ac = await _reassemble_fragment(master_ch, reassembler, timeout=3.0)
-        assert frag_data is not None, "Expected first fragment"
-        assert ac.con, "First fragment should have CON bit"
-
-        # Send a CONFIRM with the wrong sequence number (stale/duplicate).
-        wrong_seq = (ac.seq + 1) % 16
-        stale_confirm = _build_confirm_frame(wrong_seq, MASTER_ADDR, OUTSTATION_ADDR)
-        await master_ch.write_all(stale_confirm)
-
-        # It must be discarded: no second fragment shows up on a short read.
-        reassembler_stale = Reassembler()
-        frag_data_stale, _ = await _reassemble_fragment(master_ch, reassembler_stale, timeout=0.5)
-        assert frag_data_stale is None, "Mismatched-sequence CONFIRM must not advance the fragment"
-
-        # The correctly-sequenced CONFIRM still works within the same wait window.
-        correct_confirm = _build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR)
-        await master_ch.write_all(correct_confirm)
-
-        reassembler_next = Reassembler()
-        frag_data2, ac2 = await _reassemble_fragment(master_ch, reassembler_next, timeout=3.0)
-        assert frag_data2 is not None, "Correctly-sequenced CONFIRM should still advance the fragment"
-        assert not ac2.fir, "Second fragment should not have FIR"
-
-        await master_ch.close()
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
+            frag_data2, ac2 = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+            assert frag_data2 is not None, "Correctly-sequenced CONFIRM should still advance the fragment"
+            assert not ac2.fir, "Second fragment should not have FIR"
 
     @pytest.mark.asyncio
     async def test_stale_first_fragment_confirm_does_not_advance_second_wait(self) -> None:
@@ -727,60 +666,111 @@ class TestMultiFragmentResponse:
         that each fragment has its own sequence, replaying the first one while
         the second is awaited exercises a genuinely different (stale) value.
         """
-        database = _build_large_database(num_analog=500)
-        config = OutstationConfig(
-            address=OUTSTATION_ADDR,
-            master_address=MASTER_ADDR,
-            max_fragment_size=249,
-            confirm_timeout=2.0,
-        )
-        outstation = Outstation(config=config, database=database)
-        runner = _make_runner(outstation)
+        async with _awaiting_first_confirm() as (master_ch, ac1):
+            # Confirm fragment one correctly, advancing to fragment two.
+            first_fragment_seq = ac1.seq
+            await master_ch.write_all(_build_confirm_frame(first_fragment_seq, MASTER_ADDR, OUTSTATION_ADDR))
+
+            # Read fragment two; its sequence must differ from fragment one's.
+            frag_data2, ac2 = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+            assert frag_data2 is not None, "Expected second fragment"
+            second_fragment_seq = ac2.seq
+            assert second_fragment_seq != first_fragment_seq, "Fragment two must not share fragment one's sequence"
+            assert second_fragment_seq == (first_fragment_seq + 1) % 16
+
+            # Replay fragment one's (now stale) sequence while fragment two is awaited.
+            await master_ch.write_all(_build_confirm_frame(first_fragment_seq, MASTER_ADDR, OUTSTATION_ADDR))
+
+            frag_data_stale, _ = await _reassemble_fragment(master_ch, Reassembler(), timeout=0.5)
+            assert frag_data_stale is None, "Fragment one's stale sequence must not advance fragment two's wait"
+
+            # The correctly-sequenced confirm for fragment two still advances the loop.
+            await master_ch.write_all(_build_confirm_frame(second_fragment_seq, MASTER_ADDR, OUTSTATION_ADDR))
+
+            frag_data3, ac3 = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+            assert frag_data3 is not None, "Correctly-sequenced CONFIRM should advance to fragment three"
+            assert ac3.seq == (second_fragment_seq + 1) % 16
+
+    @pytest.mark.asyncio
+    async def test_link_frames_answered_while_awaiting_confirm(self) -> None:
+        """Link management frames arriving during a confirm wait are ACKed, and the wait continues."""
+        async with _awaiting_first_confirm() as (master_ch, ac):
+            reset = build_reset_link_state(destination=OUTSTATION_ADDR, source=MASTER_ADDR, dir_from_master=True)
+            test_link = build_test_link_state(
+                destination=OUTSTATION_ADDR, source=MASTER_ADDR, dir_from_master=True, fcb=True
+            )
+            await master_ch.write_all(reset.to_bytes() + test_link.to_bytes())
+
+            acks = await _read_all_response_frames(master_ch, timeout=0.5)
+            assert [f.header.control.function_code for f in acks] == [LinkFunctionCode.SEC_ACK] * 2
+            assert all(not f.header.control.prm for f in acks)
+            assert all(f.header.destination == MASTER_ADDR for f in acks)
+
+            await master_ch.write_all(_build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR))
+
+            frag_data2, ac2 = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+            assert frag_data2 is not None, "Confirm after link frames should advance to the next fragment"
+            assert not ac2.fir
+            assert ac2.seq == (ac.seq + 1) % 16
+
+    @pytest.mark.asyncio
+    async def test_confirm_in_confirmed_user_data_is_acked_and_accepted(self) -> None:
+        """A CONFIRM sent as link-confirmed user data gets a link ACK and advances to the next fragment."""
+        async with _awaiting_first_confirm() as (master_ch, ac):
+            await master_ch.write_all(_build_confirm_frame(ac.seq, MASTER_ADDR, OUTSTATION_ADDR, link_confirmed=True))
+
+            ack = await _read_response_frame(master_ch)
+            assert ack is not None, "Expected link ACK for confirmed user data"
+            assert ack.header.control.function_code == LinkFunctionCode.SEC_ACK
+            assert not ack.header.control.prm
+
+            frag_data2, ac2 = await _reassemble_fragment(master_ch, Reassembler(), timeout=3.0)
+            assert frag_data2 is not None, "Confirm in confirmed user data should advance to the next fragment"
+            assert not ac2.fir
+            assert ac2.seq == (ac.seq + 1) % 16
+
+
+class TestAnswerLinkFrame:
+    """Test the link-layer reply and user-data decision for each primary function code."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("function_code", "reply", "has_user_data"),
+        [
+            (LinkFunctionCode.PRI_RESET_LINK_STATE, LinkFunctionCode.SEC_ACK, False),
+            (LinkFunctionCode.PRI_TEST_LINK_STATE, LinkFunctionCode.SEC_ACK, False),
+            (LinkFunctionCode.PRI_CONFIRMED_USER_DATA, LinkFunctionCode.SEC_ACK, True),
+            (LinkFunctionCode.PRI_REQUEST_LINK_STATUS, LinkFunctionCode.SEC_LINK_STATUS, False),
+            (LinkFunctionCode.PRI_UNCONFIRMED_USER_DATA, None, True),
+            (LinkFunctionCode.PRI_RESET_USER_PROCESS, None, False),
+        ],
+    )
+    async def test_reply_and_user_data_flag(
+        self,
+        function_code: LinkFunctionCode,
+        reply: LinkFunctionCode | None,
+        has_user_data: bool,
+    ) -> None:
         master_ch, outstation_ch = create_channel_pair()
         await master_ch.open()
         await outstation_ch.open()
+        frame = build_primary_frame(
+            destination=OUTSTATION_ADDR,
+            source=MASTER_ADDR,
+            function_code=function_code,
+            dir_from_master=True,
+        )
 
-        request = build_integrity_poll(seq=0)
-        frame_bytes = _build_request_frame(MASTER_ADDR, OUTSTATION_ADDR, request.to_bytes())
-        await master_ch.write_all(frame_bytes)
+        assert await _answer_link_frame(outstation_ch, frame, MASTER_ADDR, OUTSTATION_ADDR) is has_user_data
 
-        task = asyncio.create_task(runner._handle_connection(outstation_ch))
-
-        # Read fragment one and confirm it correctly, advancing to fragment two.
-        reassembler1 = Reassembler()
-        frag_data1, ac1 = await _reassemble_fragment(master_ch, reassembler1, timeout=3.0)
-        assert frag_data1 is not None, "Expected first fragment"
-        first_fragment_seq = ac1.seq
-        confirm_frame = _build_confirm_frame(first_fragment_seq, MASTER_ADDR, OUTSTATION_ADDR)
-        await master_ch.write_all(confirm_frame)
-
-        # Read fragment two; its sequence must differ from fragment one's.
-        reassembler2 = Reassembler()
-        frag_data2, ac2 = await _reassemble_fragment(master_ch, reassembler2, timeout=3.0)
-        assert frag_data2 is not None, "Expected second fragment"
-        second_fragment_seq = ac2.seq
-        assert second_fragment_seq != first_fragment_seq, "Fragment two must not share fragment one's sequence"
-        assert second_fragment_seq == (first_fragment_seq + 1) % 16
-
-        # Replay fragment one's (now stale) sequence while fragment two is awaited.
-        stale_confirm = _build_confirm_frame(first_fragment_seq, MASTER_ADDR, OUTSTATION_ADDR)
-        await master_ch.write_all(stale_confirm)
-
-        reassembler_stale = Reassembler()
-        frag_data_stale, _ = await _reassemble_fragment(master_ch, reassembler_stale, timeout=0.5)
-        assert frag_data_stale is None, "Fragment one's stale sequence must not advance fragment two's wait"
-
-        # The correctly-sequenced confirm for fragment two still advances the loop.
-        correct_confirm = _build_confirm_frame(second_fragment_seq, MASTER_ADDR, OUTSTATION_ADDR)
-        await master_ch.write_all(correct_confirm)
-
-        reassembler3 = Reassembler()
-        frag_data3, ac3 = await _reassemble_fragment(master_ch, reassembler3, timeout=3.0)
-        assert frag_data3 is not None, "Correctly-sequenced CONFIRM should advance to fragment three"
-        assert ac3.seq == (second_fragment_seq + 1) % 16
+        resp = await _read_response_frame(master_ch, timeout=0.2)
+        if reply is None:
+            assert resp is None
+        else:
+            assert resp is not None
+            assert resp.header.control.function_code == reply
+            assert not resp.header.control.prm
+            assert resp.header.destination == MASTER_ADDR
+            assert resp.header.source == OUTSTATION_ADDR
 
         await master_ch.close()
-        await asyncio.sleep(0.1)
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
