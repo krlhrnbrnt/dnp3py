@@ -151,7 +151,7 @@ class TestPackagedProfileResource:
         resource = _packaged_profile_resource("full.json")
         with as_file(resource) as path:
             assert path.exists()
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         assert set(data.keys()) == {"Key", "BO", "BI", "AO", "AI", "CTR"}
 
     def test_minimal_1547_resolves_to_a_distinct_smaller_file(self) -> None:

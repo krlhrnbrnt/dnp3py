@@ -5,6 +5,7 @@ Tests specifically targeting uncovered code paths.
 
 import asyncio
 import contextlib
+import sys
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1279,6 +1280,7 @@ class TestTcpServerChannelEdgeCases:
 class TestTcpClientChannelEdgeCases:
     """Test TCP client channel edge cases."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows retries refused connects past the timeout")
     @pytest.mark.asyncio
     async def test_open_connection_refused(self) -> None:
         """Test open with connection refused."""
