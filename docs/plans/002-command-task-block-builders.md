@@ -1,6 +1,6 @@
 # 002: One control-block builder for all command tasks
 
-Status: todo
+Status: done
 Branch: refactor/command-task-block-builders
 Depends on: none
 
@@ -22,7 +22,8 @@ unchanged.
 
 ## Steps
 1. Test (characterization, passes before and after):
-   `tests/unit/master/test_commands.py::test_all_task_types_encode_identical_blocks`. For a mixed operation list
+   `tests/unit/master/test_commands.py::TestCommandTaskPolymorphism::test_all_task_types_encode_identical_blocks`
+   (inside the existing class, matching the file's layout). For a mixed operation list
    (binary and analog, indices 3 and 300), assert that the object block bytes from all three task types are equal to
    each other and to pinned golden bytes captured from `main`.
 2. Implement: move `_build_control_blocks`, `_build_crob_block` and `_build_analog_block` into `CommandTask` as
@@ -34,10 +35,17 @@ unchanged.
 4. Test: the existing `tests/unit/master/test_commands.py` and `tests/integration/test_commands.py` pass unchanged.
 
 ## Out of scope
+- The 1-byte count written under qualifier 0x28 (the spec requires 2 bytes). Found while pinning golden
+  bytes; kept byte-identical here so this stays a pure refactor, and fixed in plan 008.
 - Supporting 16-bit, float or double analog-output variations on the master side.
 - The outstation-side CROB parsing (plan 004).
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+Note: on Windows, three tests unrelated to this plan fail on `main` as well:
+`test_server_start_port_in_use` and `test_open_connection_refused` (socket semantics) and
+`test_full_json_resolves_and_parses_inside_as_file_context` (`read_text()` without `encoding`). CI runs on
+Linux and macOS only.
