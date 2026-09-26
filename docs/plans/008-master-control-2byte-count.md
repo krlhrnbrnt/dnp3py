@@ -1,6 +1,6 @@
 # 008: Two-byte count for master control blocks with qualifier 0x28
 
-Status: todo
+Status: done
 Branch: fix/master-control-2byte-count
 Depends on: 002
 
@@ -35,7 +35,15 @@ reads the first index byte as the count's high byte and misparses the whole bloc
   only removes the `ValueError`.
 
 ## Done when
-- [ ] new tests pass
-- [ ] `test_all_task_types_encode_identical_blocks[0x17]` passes unchanged
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `test_all_task_types_encode_identical_blocks[0x17]` passes unchanged
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- `_prefixed_block` encodes an empty item list as a 0x17 block with a zero count instead of raising `TypeError`.
+  No caller passes an empty list today.
+- Removed `test_direct_operate_high_index`: it asserted only that a response came back, and passed while the encoding
+  was broken. The step 2 round-trip test covers the same 0x28 path.
+- Follow-up candidate: a master-to-outstation round trip for an analog output with qualifier 0x28. The outstation
+  handles analog outputs on a separate path, and only unit golden bytes cover it.
