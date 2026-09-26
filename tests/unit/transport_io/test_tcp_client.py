@@ -1,6 +1,7 @@
 """Tests for TCP client channel."""
 
 import asyncio
+import dataclasses
 
 import pytest
 
@@ -562,7 +563,7 @@ class TestCloseIsBounded:
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(channel.write_all(self.STUFFING), timeout=0.3)
 
-            sock = channel._writer.get_extra_info("socket")  # type: ignore[union-attr]
+            sock = channel.writer.get_extra_info("socket")  # type: ignore[union-attr]
 
             loop = asyncio.get_running_loop()
             started = loop.time()
@@ -594,7 +595,7 @@ class TestCloseIsBounded:
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(channel.write_all(self.STUFFING), timeout=0.3)
 
-            sock = channel._writer.get_extra_info("socket")  # type: ignore[union-attr]
+            sock = channel.writer.get_extra_info("socket")  # type: ignore[union-attr]
 
             close_task = asyncio.create_task(channel.close())
             await asyncio.sleep(0.05)  # let close() start its bounded wait
@@ -604,8 +605,8 @@ class TestCloseIsBounded:
                 await close_task
 
             assert channel.state == ChannelState.CLOSED
-            assert channel._writer is None
-            assert channel._reader is None
+            assert channel.writer is None
+            assert channel.reader is None
             assert channel.statistics.disconnect_count == 1
 
             loop = asyncio.get_running_loop()
@@ -659,7 +660,7 @@ class TestCloseIsBounded:
         try:
             channel = TcpClientChannel(config=TcpConfig(host="127.0.0.1", port=port))
             await channel.open()
-            channel._writer.write(payload)  # type: ignore[union-attr]
+            channel.writer.write(payload)  # type: ignore[union-attr]
             await channel.close()
             await asyncio.wait_for(done.wait(), timeout=5.0)
 
@@ -668,3 +669,18 @@ class TestCloseIsBounded:
         finally:
             server.close()
             await server.wait_closed()
+
+
+async def test_connect_copies_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """connect() keeps every config field and overrides host and port."""
+
+    async def fake_open(self: TcpClientChannel) -> None:
+        pass
+
+    monkeypatch.setattr(TcpClientChannel, "open", fake_open)
+    config = TcpConfig(host="10.0.0.1", port=1, keepalive_count=8)
+
+    channel = await connect("192.0.2.1", 30000, config=config)
+
+    assert type(channel.config) is TcpConfig
+    assert channel.config == dataclasses.replace(config, host="192.0.2.1", port=30000)

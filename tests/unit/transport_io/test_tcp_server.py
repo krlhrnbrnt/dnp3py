@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 
 import pytest
 
@@ -703,3 +704,18 @@ class TestServeHelper:
             client_writer.transport.abort()
         finally:
             await server.stop()
+
+
+async def test_serve_copies_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """serve() keeps every config field and overrides host and port."""
+
+    async def fake_start(self: TcpServer) -> None:
+        pass
+
+    monkeypatch.setattr(TcpServer, "start", fake_start)
+    config = TcpServerConfig(host="10.0.0.1", port=1, keepalive_count=8, backlog=9)
+
+    server = await serve("192.0.2.1", 30000, config=config)
+
+    assert type(server.config) is TcpServerConfig
+    assert server.config == dataclasses.replace(config, host="192.0.2.1", port=30000)
