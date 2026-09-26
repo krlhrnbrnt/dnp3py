@@ -20,19 +20,10 @@ Group 22: Counter Event
 """
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 from dnp3.core.flags import CounterQuality
 from dnp3.core.timestamp import DNP3Timestamp
-from dnp3.objects.base import (
-    SIZE_2_BYTES,
-    SIZE_4_BYTES,
-    SIZE_5_BYTES,
-    SIZE_9_BYTES,
-    SIZE_11_BYTES,
-    EventObject,
-    StaticObject,
-)
+from dnp3.objects.base import EventObject, FixedSizeObject, StaticObject
 from dnp3.objects.registry import register
 
 # Group numbers
@@ -43,47 +34,28 @@ COUNTER_EVENT_GROUP = 22
 # Size constants
 SIZE_3_BYTES = 3
 
+# The with-time variations report a short read without the received length.
+_LENGTH_MSG_WITH_TIME = "{label} requires {size} {unit}"
+
 
 @register
 @dataclass(frozen=True, slots=True)
-class Counter32(StaticObject):
+class Counter32(FixedSizeObject, StaticObject):
     """Counter 32-bit with flag (g20v1).
 
-    5 bytes: 1 byte quality flags + 4 byte unsigned value.
-
     Attributes:
         quality: Quality flags.
         value: 32-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = COUNTER_STATIC_GROUP
-    VARIATION: ClassVar[int] = 1
-    SIZE: ClassVar[int] = SIZE_5_BYTES
+    GROUP = COUNTER_STATIC_GROUP
+    VARIATION = 1
+    FORMAT = "<BI"
+    _LABEL = "Counter 32-bit"
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
-
-    MAX_VALUE: ClassVar[int] = 2**32 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 5 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(4, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "Counter32":
-        """Parse from 5 bytes."""
-        if len(data) < SIZE_5_BYTES:
-            msg = f"Counter 32-bit requires {SIZE_5_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:5], "little")
-        return cls(quality=quality, value=value)
 
     @property
     def is_online(self) -> bool:
@@ -93,44 +65,22 @@ class Counter32(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class Counter16(StaticObject):
+class Counter16(FixedSizeObject, StaticObject):
     """Counter 16-bit with flag (g20v2).
 
-    3 bytes: 1 byte quality flags + 2 byte unsigned value.
-
     Attributes:
         quality: Quality flags.
         value: 16-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = COUNTER_STATIC_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_3_BYTES
+    GROUP = COUNTER_STATIC_GROUP
+    VARIATION = 2
+    FORMAT = "<BH"
+    _LABEL = "Counter 16-bit"
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
-
-    MAX_VALUE: ClassVar[int] = 2**16 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 3 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(2, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "Counter16":
-        """Parse from 3 bytes."""
-        if len(data) < SIZE_3_BYTES:
-            msg = f"Counter 16-bit requires {SIZE_3_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:3], "little")
-        return cls(quality=quality, value=value)
 
     @property
     def is_online(self) -> bool:
@@ -140,80 +90,38 @@ class Counter16(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class Counter32NoFlag(StaticObject):
+class Counter32NoFlag(FixedSizeObject, StaticObject):
     """Counter 32-bit without flag (g20v5).
-
-    4 bytes: 4 byte unsigned value.
 
     Attributes:
         value: 32-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = COUNTER_STATIC_GROUP
-    VARIATION: ClassVar[int] = 5
-    SIZE: ClassVar[int] = SIZE_4_BYTES
+    GROUP = COUNTER_STATIC_GROUP
+    VARIATION = 5
+    FORMAT = "<I"
+    _LABEL = "Counter 32-bit"
+    _RANGE_FIELD = "value"
 
     value: int
-
-    MAX_VALUE: ClassVar[int] = 2**32 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 4 bytes."""
-        return self.value.to_bytes(4, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "Counter32NoFlag":
-        """Parse from 4 bytes."""
-        if len(data) < SIZE_4_BYTES:
-            msg = f"Counter 32-bit requires {SIZE_4_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        value = int.from_bytes(data[0:4], "little")
-        return cls(value=value)
 
 
 @register
 @dataclass(frozen=True, slots=True)
-class Counter16NoFlag(StaticObject):
+class Counter16NoFlag(FixedSizeObject, StaticObject):
     """Counter 16-bit without flag (g20v6).
-
-    2 bytes: 2 byte unsigned value.
 
     Attributes:
         value: 16-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = COUNTER_STATIC_GROUP
-    VARIATION: ClassVar[int] = 6
-    SIZE: ClassVar[int] = SIZE_2_BYTES
+    GROUP = COUNTER_STATIC_GROUP
+    VARIATION = 6
+    FORMAT = "<H"
+    _LABEL = "Counter 16-bit"
+    _RANGE_FIELD = "value"
 
     value: int
-
-    MAX_VALUE: ClassVar[int] = 2**16 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 2 bytes."""
-        return self.value.to_bytes(2, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "Counter16NoFlag":
-        """Parse from 2 bytes."""
-        if len(data) < SIZE_2_BYTES:
-            msg = f"Counter 16-bit requires {SIZE_2_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        value = int.from_bytes(data[0:2], "little")
-        return cls(value=value)
 
 
 # Frozen Counter objects
@@ -221,44 +129,22 @@ class Counter16NoFlag(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class FrozenCounter32(StaticObject):
+class FrozenCounter32(FixedSizeObject, StaticObject):
     """Frozen Counter 32-bit with flag (g21v1).
 
-    5 bytes: 1 byte quality flags + 4 byte unsigned value.
-
     Attributes:
         quality: Quality flags.
         value: 32-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = FROZEN_COUNTER_GROUP
-    VARIATION: ClassVar[int] = 1
-    SIZE: ClassVar[int] = SIZE_5_BYTES
+    GROUP = FROZEN_COUNTER_GROUP
+    VARIATION = 1
+    FORMAT = "<BI"
+    _LABEL = "Frozen counter 32-bit"
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
-
-    MAX_VALUE: ClassVar[int] = 2**32 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 5 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(4, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "FrozenCounter32":
-        """Parse from 5 bytes."""
-        if len(data) < SIZE_5_BYTES:
-            msg = f"Frozen counter 32-bit requires {SIZE_5_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:5], "little")
-        return cls(quality=quality, value=value)
 
     @property
     def is_online(self) -> bool:
@@ -268,44 +154,22 @@ class FrozenCounter32(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class FrozenCounter16(StaticObject):
+class FrozenCounter16(FixedSizeObject, StaticObject):
     """Frozen Counter 16-bit with flag (g21v2).
 
-    3 bytes: 1 byte quality flags + 2 byte unsigned value.
-
     Attributes:
         quality: Quality flags.
         value: 16-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = FROZEN_COUNTER_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_3_BYTES
+    GROUP = FROZEN_COUNTER_GROUP
+    VARIATION = 2
+    FORMAT = "<BH"
+    _LABEL = "Frozen counter 16-bit"
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
-
-    MAX_VALUE: ClassVar[int] = 2**16 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 3 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(2, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "FrozenCounter16":
-        """Parse from 3 bytes."""
-        if len(data) < SIZE_3_BYTES:
-            msg = f"Frozen counter 16-bit requires {SIZE_3_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:3], "little")
-        return cls(quality=quality, value=value)
 
     @property
     def is_online(self) -> bool:
@@ -315,10 +179,8 @@ class FrozenCounter16(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class FrozenCounter32Time(StaticObject):
+class FrozenCounter32Time(FixedSizeObject, StaticObject):
     """Frozen Counter 32-bit with flag and time (g21v5).
-
-    11 bytes: 1 byte flags + 4 byte value + 6 byte timestamp.
 
     Attributes:
         quality: Quality flags.
@@ -326,44 +188,22 @@ class FrozenCounter32Time(StaticObject):
         timestamp: Time when counter was frozen.
     """
 
-    GROUP: ClassVar[int] = FROZEN_COUNTER_GROUP
-    VARIATION: ClassVar[int] = 5
-    SIZE: ClassVar[int] = SIZE_11_BYTES
+    GROUP = FROZEN_COUNTER_GROUP
+    VARIATION = 5
+    FORMAT = "<BI6s"
+    _LABEL = "Frozen counter 32-bit with time"
+    _LENGTH_MSG = _LENGTH_MSG_WITH_TIME
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
     timestamp: DNP3Timestamp
 
-    MAX_VALUE: ClassVar[int] = 2**32 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 11 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(4, "little") + self.timestamp.to_bytes()
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "FrozenCounter32Time":
-        """Parse from 11 bytes."""
-        if len(data) < SIZE_11_BYTES:
-            msg = f"Frozen counter 32-bit with time requires {SIZE_11_BYTES} bytes"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:5], "little")
-        timestamp = DNP3Timestamp.from_bytes(data[5:11])
-        return cls(quality=quality, value=value, timestamp=timestamp)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class FrozenCounter16Time(StaticObject):
+class FrozenCounter16Time(FixedSizeObject, StaticObject):
     """Frozen Counter 16-bit with flag and time (g21v6).
-
-    9 bytes: 1 byte flags + 2 byte value + 6 byte timestamp.
 
     Attributes:
         quality: Quality flags.
@@ -371,36 +211,16 @@ class FrozenCounter16Time(StaticObject):
         timestamp: Time when counter was frozen.
     """
 
-    GROUP: ClassVar[int] = FROZEN_COUNTER_GROUP
-    VARIATION: ClassVar[int] = 6
-    SIZE: ClassVar[int] = SIZE_9_BYTES
+    GROUP = FROZEN_COUNTER_GROUP
+    VARIATION = 6
+    FORMAT = "<BH6s"
+    _LABEL = "Frozen counter 16-bit with time"
+    _LENGTH_MSG = _LENGTH_MSG_WITH_TIME
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
     timestamp: DNP3Timestamp
-
-    MAX_VALUE: ClassVar[int] = 2**16 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 9 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(2, "little") + self.timestamp.to_bytes()
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "FrozenCounter16Time":
-        """Parse from 9 bytes."""
-        if len(data) < SIZE_9_BYTES:
-            msg = f"Frozen counter 16-bit with time requires {SIZE_9_BYTES} bytes"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:3], "little")
-        timestamp = DNP3Timestamp.from_bytes(data[3:9])
-        return cls(quality=quality, value=value, timestamp=timestamp)
 
 
 # Counter Event objects
@@ -408,94 +228,48 @@ class FrozenCounter16Time(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class CounterEvent32(EventObject):
+class CounterEvent32(FixedSizeObject, EventObject):
     """Counter Event 32-bit with flag (g22v1).
 
-    5 bytes: 1 byte quality flags + 4 byte unsigned value.
-
     Attributes:
         quality: Quality flags.
         value: 32-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = COUNTER_EVENT_GROUP
-    VARIATION: ClassVar[int] = 1
-    SIZE: ClassVar[int] = SIZE_5_BYTES
+    GROUP = COUNTER_EVENT_GROUP
+    VARIATION = 1
+    FORMAT = "<BI"
+    _LABEL = "Counter event 32-bit"
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
 
-    MAX_VALUE: ClassVar[int] = 2**32 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 5 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(4, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "CounterEvent32":
-        """Parse from 5 bytes."""
-        if len(data) < SIZE_5_BYTES:
-            msg = f"Counter event 32-bit requires {SIZE_5_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:5], "little")
-        return cls(quality=quality, value=value)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class CounterEvent16(EventObject):
+class CounterEvent16(FixedSizeObject, EventObject):
     """Counter Event 16-bit with flag (g22v2).
 
-    3 bytes: 1 byte quality flags + 2 byte unsigned value.
-
     Attributes:
         quality: Quality flags.
         value: 16-bit unsigned counter value.
     """
 
-    GROUP: ClassVar[int] = COUNTER_EVENT_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_3_BYTES
+    GROUP = COUNTER_EVENT_GROUP
+    VARIATION = 2
+    FORMAT = "<BH"
+    _LABEL = "Counter event 16-bit"
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
 
-    MAX_VALUE: ClassVar[int] = 2**16 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 3 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(2, "little")
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "CounterEvent16":
-        """Parse from 3 bytes."""
-        if len(data) < SIZE_3_BYTES:
-            msg = f"Counter event 16-bit requires {SIZE_3_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:3], "little")
-        return cls(quality=quality, value=value)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class CounterEvent32Time(EventObject):
+class CounterEvent32Time(FixedSizeObject, EventObject):
     """Counter Event 32-bit with flag and time (g22v5).
-
-    11 bytes: 1 byte flags + 4 byte value + 6 byte timestamp.
 
     Attributes:
         quality: Quality flags.
@@ -503,44 +277,22 @@ class CounterEvent32Time(EventObject):
         timestamp: Time when event occurred.
     """
 
-    GROUP: ClassVar[int] = COUNTER_EVENT_GROUP
-    VARIATION: ClassVar[int] = 5
-    SIZE: ClassVar[int] = SIZE_11_BYTES
+    GROUP = COUNTER_EVENT_GROUP
+    VARIATION = 5
+    FORMAT = "<BI6s"
+    _LABEL = "Counter event 32-bit with time"
+    _LENGTH_MSG = _LENGTH_MSG_WITH_TIME
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
     timestamp: DNP3Timestamp
 
-    MAX_VALUE: ClassVar[int] = 2**32 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 11 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(4, "little") + self.timestamp.to_bytes()
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "CounterEvent32Time":
-        """Parse from 11 bytes."""
-        if len(data) < SIZE_11_BYTES:
-            msg = f"Counter event 32-bit with time requires {SIZE_11_BYTES} bytes"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:5], "little")
-        timestamp = DNP3Timestamp.from_bytes(data[5:11])
-        return cls(quality=quality, value=value, timestamp=timestamp)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class CounterEvent16Time(EventObject):
+class CounterEvent16Time(FixedSizeObject, EventObject):
     """Counter Event 16-bit with flag and time (g22v6).
-
-    9 bytes: 1 byte flags + 2 byte value + 6 byte timestamp.
 
     Attributes:
         quality: Quality flags.
@@ -548,33 +300,13 @@ class CounterEvent16Time(EventObject):
         timestamp: Time when event occurred.
     """
 
-    GROUP: ClassVar[int] = COUNTER_EVENT_GROUP
-    VARIATION: ClassVar[int] = 6
-    SIZE: ClassVar[int] = SIZE_9_BYTES
+    GROUP = COUNTER_EVENT_GROUP
+    VARIATION = 6
+    FORMAT = "<BH6s"
+    _LABEL = "Counter event 16-bit with time"
+    _LENGTH_MSG = _LENGTH_MSG_WITH_TIME
+    _RANGE_FIELD = "value"
 
     quality: CounterQuality
     value: int
     timestamp: DNP3Timestamp
-
-    MAX_VALUE: ClassVar[int] = 2**16 - 1
-
-    def __post_init__(self) -> None:
-        """Validate value range."""
-        if not 0 <= self.value <= self.MAX_VALUE:
-            msg = f"Value {self.value} out of range (0 to {self.MAX_VALUE})"
-            raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 9 bytes."""
-        return bytes([int(self.quality)]) + self.value.to_bytes(2, "little") + self.timestamp.to_bytes()
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "CounterEvent16Time":
-        """Parse from 9 bytes."""
-        if len(data) < SIZE_9_BYTES:
-            msg = f"Counter event 16-bit with time requires {SIZE_9_BYTES} bytes"
-            raise ValueError(msg)
-        quality = CounterQuality(data[0])
-        value = int.from_bytes(data[1:3], "little")
-        timestamp = DNP3Timestamp.from_bytes(data[3:9])
-        return cls(quality=quality, value=value, timestamp=timestamp)
