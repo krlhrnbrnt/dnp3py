@@ -319,21 +319,31 @@ class TestControlOperations:
 class TestHighIndexCommands:
     """Test commands with high index values."""
 
-    def test_direct_operate_high_index(self) -> None:
-        """Direct operate works with index > 255."""
-        database = Database()
-        database.add_binary_output(1000, BinaryOutputConfig())
+    def test_direct_operate_index_above_255_reaches_handler(self) -> None:
+        """The outstation parses the master's 0x28 block as one operation on the addressed index."""
+        received_commands: list[tuple[int, ControlCode]] = []
 
-        outstation = Outstation(database=database)
+        class TrackingHandler(DefaultCommandHandler):
+            def direct_operate_binary_output(
+                self,
+                index: int,
+                code: ControlCode,
+                count: int,
+                on_time: int,
+                off_time: int,
+            ):
+                received_commands.append((index, code))
+                return super().direct_operate_binary_output(index, code, count, on_time, off_time)
+
+        database = Database()
+        database.add_binary_output(300, BinaryOutputConfig())
+        outstation = Outstation(database=database, handler=TrackingHandler())
         master = Master()
 
-        builder = master.command_builder()
-        builder.add_crob(index=1000, code=ControlCode.LATCH_ON)
-        task = builder.build_direct_operate()
+        task = master.command_builder().latch_on(index=300).build_direct_operate()
+        outstation.process_request(master.build_direct_operate(task).to_bytes())
 
-        request = master.build_direct_operate(task)
-        responses = outstation.process_request(request.to_bytes())
-        assert len(responses) > 0
+        assert received_commands == [(300, ControlCode.LATCH_ON)]
 
 
 class TestCommandSequence:

@@ -17,6 +17,7 @@ from dnp3.master.commands import (
     DirectOperateTask,
     OperateTask,
     SelectTask,
+    _prefixed_block,
 )
 
 
@@ -186,6 +187,15 @@ class TestSelectTask:
 
         # Should use 2-byte index qualifier (0x28)
         assert fragment.objects[0].header.qualifier == 0x28
+
+    def test_build_request_more_than_255_operations(self) -> None:
+        """A count above 255 needs the 2-byte count of 0x28 even when every index fits in one byte."""
+        task = SelectTask(operations=[ControlOperation(index=i % 256) for i in range(256)])
+
+        block = task.build_request().objects[0]
+
+        assert block.header.qualifier == 0x28
+        assert block.data[:2] == (256).to_bytes(2, "little")
 
 
 class TestOperateTask:
@@ -537,15 +547,13 @@ class TestCommandTaskPolymorphism:
     @pytest.mark.parametrize(
         ("high_index", "expected"),
         [
-            # Qualifier 0x28 calls for a 2-byte count (IEEE 1815-2012 Table 4-3); these bytes pin the
-            # current 1-byte count.
             (
                 300,
                 [
                     bytes.fromhex(
-                        "0c0128" + "02" + "0300" + "0102e8030000f401000000" + "2c01" + "0401000000000000000000"
+                        "0c0128" + "0200" + "0300" + "0102e8030000f401000000" + "2c01" + "0401000000000000000000"
                     ),
-                    bytes.fromhex("290128" + "02" + "0300" + "2efbffff00" + "2c01" + "7011010000"),
+                    bytes.fromhex("290128" + "0200" + "0300" + "2efbffff00" + "2c01" + "7011010000"),
                 ],
             ),
             (
@@ -570,6 +578,17 @@ class TestCommandTaskPolymorphism:
         for task_type in (SelectTask, OperateTask, DirectOperateTask):
             fragment = task_type(operations=list(operations)).build_request()
             assert [block.to_bytes() for block in fragment.objects] == expected, task_type.__name__
+
+
+class TestPrefixedBlock:
+    """Tests for the index-prefixed block encoder."""
+
+    def test_empty_items_encode_zero_count(self) -> None:
+        """An empty block uses 0x17 with a zero count."""
+        block = _prefixed_block(CROB_GROUP, CROB_VARIATION, [])
+
+        assert block.header.qualifier == 0x17
+        assert block.data == b"\x00"
 
 
 class TestCROBConstants:
