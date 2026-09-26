@@ -1,6 +1,6 @@
 # 005: Single link-layer dispatch in the outstation TCP runner
 
-Status: todo
+Status: done
 Branch: refactor/tcp-runner-link-dispatch
 Depends on: none (merge after 003 to type against the final channel classes)
 
@@ -30,6 +30,7 @@ Depends on: none (merge after 003 to type against the final channel classes)
 2. Implement: add `async def _answer_link_frame(channel, frame, master, outstation) -> bool`. It returns `True` when
    the frame carries user data to process, and `False` when the frame was fully handled or should be skipped. Both
    loops call it.
+   - Deviation: it is a module-level function rather than a method, since it uses no runner state.
 3. Implement:
    - Type `channel: Channel`.
    - Type `_connection_task: asyncio.Task[None] | None`.
@@ -39,15 +40,19 @@ Depends on: none (merge after 003 to type against the final channel classes)
 4. Implement: delete the mypy override and the ruff per-file ignores for `tcp_runner.py` in `pyproject.toml`. If
    `PLR0915` still fires, split `_handle_connection` at the "complete fragment → send responses" boundary into
    `_send_responses`.
+   - `PLR0915` did fire, so `_send_responses` was split out. `_wait_for_confirm` also lost its `reassembler`
+     parameter: it always built its own, so the connection reassembler was passed through unused.
 5. Test: the existing `tests/unit/outstation/test_tcp_runner.py`, `tests/integration/test_tcp_outstation_e2e.py` and
    `test_mesa_tcp_e2e.py` pass.
+   - Added: tests for the reply and user-data decision of every primary link function code, including an
+     unsupported one, and a CONFIRM carried in confirmed user data while a confirm is awaited.
 
 ## Out of scope
 - Any change to confirm timeout or sequence semantics.
 - `_handle_connection` keeps its signature (tests call it with a `SimulatorChannel`).
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean, with the
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean, with the
       tcp_runner override and ignores removed
