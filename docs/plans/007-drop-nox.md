@@ -1,6 +1,6 @@
 # 007: Drop nox in favor of uv
 
-Status: todo
+Status: done
 Branch: chore/drop-nox
 Depends on: none
 
@@ -30,6 +30,10 @@ does through its GitHub matrix. There is no library change.
 - CI workflow changes (none needed).
 
 ## Done when
-- [ ] `uv lock` committed with `pyproject.toml`
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] `uv lock` committed with `pyproject.toml`
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- `.gitignore` keeps `.nox/` so leftover local nox environments stay ignored.
+- `README.md` also drops the redundant `uv run --python 3.12` example; the all-versions loop covers it.
