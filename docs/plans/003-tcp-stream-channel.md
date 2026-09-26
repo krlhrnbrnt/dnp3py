@@ -1,6 +1,6 @@
 # 003: One stream implementation for TCP client and server channels
 
-Status: todo
+Status: done
 Branch: refactor/tcp-stream-channel
 Depends on: none
 
@@ -34,15 +34,21 @@ both. Their constructors, fields, dataclass behavior and exceptions are unchange
    `read_exactly`, `write_all` or `close`. It fails.
 2. Implement: create a plain mixin, not a dataclass, `class StreamIO` in `tcp_client.py`. It has the single copy of
    the properties, `close`, `read`, `write`, `read_exactly` and `write_all`, written against an abstract hook
-   `_streams() -> tuple[StreamReader, StreamWriter]` that raises `ChannelClosedError("Channel is not open")`.
+   `_streams() -> tuple[StreamReader | None, StreamWriter | None]`. Reads raise
+   `ChannelClosedError("Channel is not open")` when the state isn't `OPEN` or the reader is `None`; writes do the
+   same for the writer. A `_release_streams()` hook (no-op by default) lets the client drop its streams on close.
    - The client's hook returns `_reader`/`_writer`.
    - The server's hook returns `reader`/`writer`.
+   - Deviation: the plan first had one hook that raised when either stream was missing. Existing tests in
+     `test_coverage_gaps.py` set only `_reader` or only `_writer`, and the old client code checked only the stream
+     each method uses, so the check stays per direction.
 
    Both dataclasses keep their fields and add `StreamIO` as a base. Error messages, statistics updates and the
    `write_all` short-write check stay exactly as they are.
 3. Implement: move socket options into a module-level `configure_socket(sock, config)` in `tcp_client.py`.
    `TcpClientChannel` and `TcpServer` both call it.
-4. Test: `test_connect_copies_config` and `test_serve_copies_config` assert that the returned channel/server config
+4. Test: `test_connect_copies_config` and `test_serve_copies_config` (characterization tests: they pass against the
+   manual copies too, and fail if a field is dropped) assert that the returned channel/server config
    has the exact type (`TcpConfig` or `TcpServerConfig`), the new host and port, and every other field copied.
    Implement: private `_copy_config(cls, config, **overrides)` builds
    `cls(**{f.name: getattr(config, f.name) for f in dataclasses.fields(cls)} | overrides)`. It replaces the manual
@@ -57,6 +63,6 @@ both. Their constructors, fields, dataclass behavior and exceptions are unchange
 - `tcp_runner.py` typing (plan 005).
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
