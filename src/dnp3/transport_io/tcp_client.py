@@ -6,7 +6,7 @@ DNP3 outstations or other TCP-based DNP3 endpoints.
 
 import asyncio
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from dnp3.transport_io.channel import (
     ChannelClosedError,
@@ -19,22 +19,46 @@ from dnp3.transport_io.channel import (
 )
 
 
-@dataclass
-class TcpClientChannel:
-    """TCP client channel for DNP3 communication.
+def configure_socket(sock: socket.socket, config: TcpConfig) -> None:
+    """Apply the TCP_NODELAY and keepalive options from config to sock."""
+    # TCP_NODELAY - disable Nagle's algorithm
+    if config.nodelay:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-    Connects to a remote TCP server and provides async read/write operations.
+    # SO_KEEPALIVE - enable keepalive
+    if config.keepalive:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
-    Attributes:
-        config: TCP configuration.
+        # Platform-specific keepalive options
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, int(config.keepalive_idle))
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, int(config.keepalive_interval))
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, config.keepalive_count)
+
+
+class StreamIO:
+    """Read, write and close over an asyncio stream pair.
+
+    Shared by the client and server channels, which differ only in where the streams come from.
     """
 
-    config: TcpConfig = field(default_factory=TcpConfig)
+    config: TcpConfig
+    reader: asyncio.StreamReader | None
+    writer: asyncio.StreamWriter | None
+    _state: ChannelState
+    _statistics: ChannelStatistics
 
-    _state: ChannelState = field(default=ChannelState.CLOSED, init=False)
-    _statistics: ChannelStatistics = field(default_factory=ChannelStatistics, init=False)
-    _reader: asyncio.StreamReader | None = field(default=None, init=False)
-    _writer: asyncio.StreamWriter | None = field(default=None, init=False)
+    def _address(self, key: str) -> tuple[str, int] | None:
+        if self.is_open and self.writer is not None:
+            try:
+                name = self.writer.get_extra_info(key)
+                if name:
+                    return (name[0], name[1])
+            except (AttributeError, IndexError):
+                pass
+        return None
 
     @property
     def state(self) -> ChannelState:
@@ -54,103 +78,18 @@ class TcpClientChannel:
     @property
     def local_address(self) -> tuple[str, int] | None:
         """Get local address (host, port) if connected."""
-        if self._writer is not None:
-            try:
-                sockname = self._writer.get_extra_info("sockname")
-                if sockname:
-                    return (sockname[0], sockname[1])
-            except (AttributeError, IndexError):
-                pass
-        return None
+        return self._address("sockname")
 
     @property
     def remote_address(self) -> tuple[str, int] | None:
         """Get remote address (host, port) if connected."""
-        if self._writer is not None:
-            try:
-                peername = self._writer.get_extra_info("peername")
-                if peername:
-                    return (peername[0], peername[1])
-            except (AttributeError, IndexError):
-                pass
-        return None
-
-    async def open(self) -> None:
-        """Open the channel by connecting to the remote server.
-
-        Raises:
-            ChannelConnectionError: If connection fails.
-            ChannelTimeoutError: If connection times out.
-        """
-        if self._state == ChannelState.OPEN:
-            return
-
-        self._state = ChannelState.OPENING
-
-        try:
-            self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(
-                    host=self.config.host,
-                    port=self.config.port,
-                ),
-                timeout=self.config.connect_timeout,
-            )
-
-            # Configure socket options
-            assert self._writer is not None  # Just assigned above
-            sock = self._writer.get_extra_info("socket")
-            if sock is not None:
-                self._configure_socket(sock)
-
-            self._state = ChannelState.OPEN
-            self._statistics.connect_count += 1
-
-        except TimeoutError as e:
-            self._state = ChannelState.CLOSED
-            raise ChannelTimeoutError(f"Connection to {self.config.host}:{self.config.port} timed out") from e
-        except OSError as e:
-            self._state = ChannelState.CLOSED
-            raise ChannelConnectionError(f"Failed to connect to {self.config.host}:{self.config.port}: {e}") from e
-
-    def _configure_socket(self, sock: socket.socket) -> None:
-        """Configure socket options.
-
-        Args:
-            sock: Socket to configure.
-        """
-        # TCP_NODELAY - disable Nagle's algorithm
-        if self.config.nodelay:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-        # SO_KEEPALIVE - enable keepalive
-        if self.config.keepalive:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-
-            # Platform-specific keepalive options
-            if hasattr(socket, "TCP_KEEPIDLE"):
-                sock.setsockopt(
-                    socket.IPPROTO_TCP,
-                    socket.TCP_KEEPIDLE,
-                    int(self.config.keepalive_idle),
-                )
-            if hasattr(socket, "TCP_KEEPINTVL"):
-                sock.setsockopt(
-                    socket.IPPROTO_TCP,
-                    socket.TCP_KEEPINTVL,
-                    int(self.config.keepalive_interval),
-                )
-            if hasattr(socket, "TCP_KEEPCNT"):
-                sock.setsockopt(
-                    socket.IPPROTO_TCP,
-                    socket.TCP_KEEPCNT,
-                    self.config.keepalive_count,
-                )
+        return self._address("peername")
 
     async def close(self) -> None:
         """Close the channel, gracefully if the peer lets it.
 
         Waits at most `config.close_timeout` for unsent bytes to drain, then
-        aborts.
+        aborts the transport.
         """
         if self._state == ChannelState.CLOSED:
             return
@@ -158,26 +97,24 @@ class TcpClientChannel:
         self._state = ChannelState.CLOSING
 
         try:
-            if self._writer is not None:
+            if self.writer is not None:
                 try:
-                    self._writer.close()
-                    await asyncio.wait_for(self._writer.wait_closed(), timeout=self.config.close_timeout)
+                    self.writer.close()
+                    await asyncio.wait_for(self.writer.wait_closed(), timeout=self.config.close_timeout)
                 except TimeoutError:
                     # A peer that stopped reading never drains the send buffer, so a
                     # graceful close would wait forever.
-                    self._writer.transport.abort()
+                    self.writer.transport.abort()
                 except asyncio.CancelledError:
                     # Cancelled while waiting for the drain: abort so the transport
                     # is not left half-closed, then let the cancellation propagate.
-                    self._writer.transport.abort()
+                    self.writer.transport.abort()
                     raise
                 except (OSError, ConnectionError):
-                    pass  # Ignore errors during close
+                    pass  # The peer may already be gone; the channel is closing regardless.
         finally:
             # Runs on every path, including a re-raised cancellation, so the
-            # channel never stays stuck in CLOSING.
-            self._writer = None
-            self._reader = None
+            # channel always ends CLOSED with the disconnect counted once.
             self._state = ChannelState.CLOSED
             self._statistics.disconnect_count += 1
 
@@ -195,13 +132,13 @@ class TcpClientChannel:
             ChannelTimeoutError: If read times out.
             ChannelError: If read fails.
         """
-        if self._state != ChannelState.OPEN or self._reader is None:
+        if self._state != ChannelState.OPEN or self.reader is None:
             raise ChannelClosedError("Channel is not open")
 
         try:
             timeout = self.config.read_timeout if self.config.read_timeout > 0 else None
             data = await asyncio.wait_for(
-                self._reader.read(max_bytes),
+                self.reader.read(max_bytes),
                 timeout=timeout,
             )
             if data:
@@ -228,14 +165,14 @@ class TcpClientChannel:
             ChannelTimeoutError: If write times out.
             ChannelError: If write fails.
         """
-        if self._state != ChannelState.OPEN or self._writer is None:
+        if self._state != ChannelState.OPEN or self.writer is None:
             raise ChannelClosedError("Channel is not open")
 
         try:
-            self._writer.write(data)
+            self.writer.write(data)
             timeout = self.config.write_timeout if self.config.write_timeout > 0 else None
             await asyncio.wait_for(
-                self._writer.drain(),
+                self.writer.drain(),
                 timeout=timeout,
             )
             self._statistics.bytes_sent += len(data)
@@ -261,13 +198,13 @@ class TcpClientChannel:
             ChannelTimeoutError: If read times out.
             ChannelError: If read fails.
         """
-        if self._state != ChannelState.OPEN or self._reader is None:
+        if self._state != ChannelState.OPEN or self.reader is None:
             raise ChannelClosedError("Channel is not open")
 
         try:
             timeout = self.config.read_timeout if self.config.read_timeout > 0 else None
             data = await asyncio.wait_for(
-                self._reader.readexactly(num_bytes),
+                self.reader.readexactly(num_bytes),
                 timeout=timeout,
             )
             self._statistics.bytes_received += len(data)
@@ -295,6 +232,69 @@ class TcpClientChannel:
         written = await self.write(data)
         if written != len(data):
             raise ChannelError(f"Only wrote {written} of {len(data)} bytes")
+
+
+@dataclass
+class TcpClientChannel(StreamIO):
+    """TCP client channel for DNP3 communication.
+
+    Connects to a remote TCP server and provides async read/write operations.
+
+    Attributes:
+        config: TCP configuration.
+    """
+
+    config: TcpConfig = field(default_factory=TcpConfig)
+
+    _state: ChannelState = field(default=ChannelState.CLOSED, init=False)
+    _statistics: ChannelStatistics = field(default_factory=ChannelStatistics, init=False)
+    reader: asyncio.StreamReader | None = field(default=None, init=False)
+    writer: asyncio.StreamWriter | None = field(default=None, init=False)
+
+    async def open(self) -> None:
+        """Open the channel by connecting to the remote server.
+
+        Raises:
+            ChannelConnectionError: If connection fails.
+            ChannelTimeoutError: If connection times out.
+        """
+        if self._state == ChannelState.OPEN:
+            return
+
+        self._state = ChannelState.OPENING
+
+        try:
+            self.reader, self.writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host=self.config.host,
+                    port=self.config.port,
+                ),
+                timeout=self.config.connect_timeout,
+            )
+
+            # Configure socket options
+            assert self.writer is not None  # Just assigned above
+            sock = self.writer.get_extra_info("socket")
+            if sock is not None:
+                configure_socket(sock, self.config)
+
+            self._state = ChannelState.OPEN
+            self._statistics.connect_count += 1
+
+        except TimeoutError as e:
+            self._state = ChannelState.CLOSED
+            raise ChannelTimeoutError(f"Connection to {self.config.host}:{self.config.port} timed out") from e
+        except OSError as e:
+            self._state = ChannelState.CLOSED
+            raise ChannelConnectionError(f"Failed to connect to {self.config.host}:{self.config.port}: {e}") from e
+
+    async def close(self) -> None:
+        """Close the channel as `StreamIO.close` does, then drop the streams."""
+        try:
+            await super().close()
+        finally:
+            self.reader = None
+            self.writer = None
 
     async def __aenter__(self) -> "TcpClientChannel":
         """Async context manager entry."""
@@ -330,23 +330,7 @@ async def connect(
         ChannelConnectionError: If connection fails.
         ChannelTimeoutError: If connection times out.
     """
-    if config is None:
-        config = TcpConfig(host=host, port=port)
-    else:
-        config = TcpConfig(
-            host=host,
-            port=port,
-            read_buffer_size=config.read_buffer_size,
-            write_buffer_size=config.write_buffer_size,
-            connect_timeout=config.connect_timeout,
-            read_timeout=config.read_timeout,
-            write_timeout=config.write_timeout,
-            nodelay=config.nodelay,
-            keepalive=config.keepalive,
-            keepalive_idle=config.keepalive_idle,
-            keepalive_interval=config.keepalive_interval,
-            keepalive_count=config.keepalive_count,
-        )
+    config = TcpConfig(host=host, port=port) if config is None else replace(config, host=host, port=port)
 
     channel = TcpClientChannel(config=config)
     await channel.open()

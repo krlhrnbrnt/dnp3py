@@ -854,8 +854,8 @@ class TestTcpClientCoverage:
         """Test client channel read OSError handling."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._reader = AsyncMock(spec=asyncio.StreamReader)
-        channel._reader.read = AsyncMock(side_effect=OSError("Connection reset"))
+        channel.reader = AsyncMock(spec=asyncio.StreamReader)
+        channel.reader.read = AsyncMock(side_effect=OSError("Connection reset"))
 
         with pytest.raises(ChannelError, match="Read failed"):
             await channel.read(100)
@@ -865,9 +865,9 @@ class TestTcpClientCoverage:
         """Test client channel write OSError handling."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._writer = MagicMock(spec=asyncio.StreamWriter)
-        channel._writer.write = MagicMock()
-        channel._writer.drain = AsyncMock(side_effect=OSError("Broken pipe"))
+        channel.writer = MagicMock(spec=asyncio.StreamWriter)
+        channel.writer.write = MagicMock()
+        channel.writer.drain = AsyncMock(side_effect=OSError("Broken pipe"))
 
         with pytest.raises(ChannelError, match="Write failed"):
             await channel.write(b"test")
@@ -877,8 +877,8 @@ class TestTcpClientCoverage:
         """Test client channel read_exactly error paths."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._reader = AsyncMock(spec=asyncio.StreamReader)
-        channel._reader.readexactly = AsyncMock(side_effect=OSError("Connection reset"))
+        channel.reader = AsyncMock(spec=asyncio.StreamReader)
+        channel.reader.readexactly = AsyncMock(side_effect=OSError("Connection reset"))
 
         with pytest.raises(ChannelError, match="Read failed"):
             await channel.read_exactly(10)
@@ -889,8 +889,8 @@ class TestTcpClientCoverage:
         config = TcpConfig(read_timeout=0.001)
         channel = TcpClientChannel(config=config)
         channel._state = ChannelState.OPEN
-        channel._reader = AsyncMock(spec=asyncio.StreamReader)
-        channel._reader.readexactly = AsyncMock(side_effect=TimeoutError())
+        channel.reader = AsyncMock(spec=asyncio.StreamReader)
+        channel.reader.readexactly = AsyncMock(side_effect=TimeoutError())
 
         with pytest.raises(ChannelTimeoutError):
             await channel.read_exactly(10)
@@ -900,7 +900,7 @@ class TestTcpClientCoverage:
         """Test client write_all when write is incomplete."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._writer = MagicMock(spec=asyncio.StreamWriter)
+        channel.writer = MagicMock(spec=asyncio.StreamWriter)
 
         with (
             patch.object(channel, "write", return_value=2),
@@ -1297,9 +1297,9 @@ class TestTcpClientChannelEdgeCases:
         """Test close handles OSError gracefully."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._writer = MagicMock(spec=asyncio.StreamWriter)
-        channel._writer.close = MagicMock()
-        channel._writer.wait_closed = AsyncMock(side_effect=OSError("Connection reset"))
+        channel.writer = MagicMock(spec=asyncio.StreamWriter)
+        channel.writer.close = MagicMock()
+        channel.writer.wait_closed = AsyncMock(side_effect=OSError("Connection reset"))
 
         await channel.close()
         assert channel._state == ChannelState.CLOSED
@@ -1309,8 +1309,8 @@ class TestTcpClientChannelEdgeCases:
         """Test read returns empty bytes on EOF."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._reader = AsyncMock(spec=asyncio.StreamReader)
-        channel._reader.read = AsyncMock(return_value=b"")
+        channel.reader = AsyncMock(spec=asyncio.StreamReader)
+        channel.reader.read = AsyncMock(return_value=b"")
 
         result = await channel.read(100)
         assert result == b""
@@ -1320,8 +1320,8 @@ class TestTcpClientChannelEdgeCases:
         """Test read_exactly raises on incomplete read."""
         channel = TcpClientChannel()
         channel._state = ChannelState.OPEN
-        channel._reader = AsyncMock(spec=asyncio.StreamReader)
-        channel._reader.readexactly = AsyncMock(side_effect=asyncio.IncompleteReadError(b"partial", 100))
+        channel.reader = AsyncMock(spec=asyncio.StreamReader)
+        channel.reader.readexactly = AsyncMock(side_effect=asyncio.IncompleteReadError(b"partial", 100))
         from dnp3.transport_io.channel import ChannelClosedError
 
         with pytest.raises(ChannelClosedError):
@@ -3855,7 +3855,7 @@ class TestTcpClientAddressExceptions:
         # Create mock writer that raises on get_extra_info
         mock_writer = MagicMock()
         mock_writer.get_extra_info = MagicMock(side_effect=AttributeError())
-        channel._writer = mock_writer
+        channel.writer = mock_writer
 
         assert channel.local_address is None
 
@@ -3869,7 +3869,7 @@ class TestTcpClientAddressExceptions:
 
         mock_writer = MagicMock()
         mock_writer.get_extra_info = MagicMock(side_effect=IndexError())
-        channel._writer = mock_writer
+        channel.writer = mock_writer
 
         assert channel.remote_address is None
 
@@ -3889,7 +3889,7 @@ class TestTcpClientWriteTimeout:
         mock_writer = MagicMock()
         mock_writer.write = MagicMock()
         mock_writer.drain = AsyncMock(side_effect=TimeoutError())
-        channel._writer = mock_writer
+        channel.writer = mock_writer
 
         with pytest.raises(ChannelTimeoutError, match="Write timed out"):
             await channel.write(b"test")

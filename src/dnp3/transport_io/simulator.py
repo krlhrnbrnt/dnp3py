@@ -73,7 +73,6 @@ class SimulatorChannel:
         """
         if self._state == ChannelState.OPEN:
             return
-        self._state = ChannelState.OPENING
         self._state = ChannelState.OPEN
         self._statistics.connect_count += 1
 
@@ -343,7 +342,6 @@ class SimulatorServer:
         """Start listening for connections."""
         if self._state == ChannelState.OPEN:
             return
-        self._state = ChannelState.OPENING
         self._state = ChannelState.OPEN
 
     async def stop(self) -> None:
