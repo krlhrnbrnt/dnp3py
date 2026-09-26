@@ -20,13 +20,8 @@ from typing import ClassVar
 from dnp3.core.enums import ControlCode as ControlCode
 from dnp3.core.flags import BinaryQuality
 from dnp3.core.timestamp import DNP3Timestamp
-from dnp3.objects.base import (
-    SIZE_1_BYTE,
-    SIZE_7_BYTES,
-    SIZE_11_BYTES,
-    EventObject,
-    StaticObject,
-)
+from dnp3.objects.base import EventObject, FixedSizeObject, StaticObject
+from dnp3.objects.binary_input import _BinaryFlags
 from dnp3.objects.registry import register
 
 # Group numbers
@@ -67,22 +62,9 @@ class CommandStatus(IntEnum):
     UNDEFINED = 127  # Undefined error
 
 
-def _extract_state(flags: int) -> bool:
-    """Extract binary state from flags byte."""
-    return bool(flags & STATE_BIT)
-
-
-def _build_flags(quality: BinaryQuality, state: bool) -> int:
-    """Build flags byte from quality and state."""
-    flags = int(quality)
-    if state:
-        flags |= STATE_BIT
-    return flags
-
-
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryOutputFlags(StaticObject):
+class BinaryOutputFlags(_BinaryFlags, StaticObject):
     """Binary Output with flags (g10v2).
 
     Each point is 1 byte containing quality flags and state.
@@ -92,27 +74,13 @@ class BinaryOutputFlags(StaticObject):
         state: Binary state (bit 7): False=off, True=on.
     """
 
-    GROUP: ClassVar[int] = BINARY_OUTPUT_STATIC_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_1_BYTE
+    GROUP = BINARY_OUTPUT_STATIC_GROUP
+    VARIATION = 2
+    FORMAT = "<B"
+    _LABEL = "Binary output"
 
     quality: BinaryQuality
     state: bool
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 1 byte."""
-        return bytes([_build_flags(self.quality, self.state)])
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryOutputFlags":
-        """Parse from 1 byte."""
-        if len(data) < SIZE_1_BYTE:
-            msg = f"Binary output requires {SIZE_1_BYTE} byte, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        return cls(quality=quality, state=state)
 
     @property
     def is_online(self) -> bool:
@@ -122,7 +90,7 @@ class BinaryOutputFlags(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryOutputEvent(EventObject):
+class BinaryOutputEvent(_BinaryFlags, EventObject):
     """Binary Output Event without time (g11v1).
 
     Each event is 1 byte containing quality flags and state.
@@ -132,32 +100,18 @@ class BinaryOutputEvent(EventObject):
         state: Binary state (bit 7): False=off, True=on.
     """
 
-    GROUP: ClassVar[int] = BINARY_OUTPUT_EVENT_GROUP
-    VARIATION: ClassVar[int] = 1
-    SIZE: ClassVar[int] = SIZE_1_BYTE
+    GROUP = BINARY_OUTPUT_EVENT_GROUP
+    VARIATION = 1
+    FORMAT = "<B"
+    _LABEL = "Binary output event"
 
     quality: BinaryQuality
     state: bool
 
-    def to_bytes(self) -> bytes:
-        """Serialize to 1 byte."""
-        return bytes([_build_flags(self.quality, self.state)])
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryOutputEvent":
-        """Parse from 1 byte."""
-        if len(data) < SIZE_1_BYTE:
-            msg = f"Binary output event requires {SIZE_1_BYTE} byte, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        return cls(quality=quality, state=state)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryOutputEventTime(EventObject):
+class BinaryOutputEventTime(_BinaryFlags, EventObject):
     """Binary Output Event with absolute time (g11v2).
 
     Each event is 7 bytes: 1 byte flags + 6 byte timestamp.
@@ -168,35 +122,19 @@ class BinaryOutputEventTime(EventObject):
         timestamp: Time when event occurred.
     """
 
-    GROUP: ClassVar[int] = BINARY_OUTPUT_EVENT_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_7_BYTES
+    GROUP = BINARY_OUTPUT_EVENT_GROUP
+    VARIATION = 2
+    FORMAT = "<B6s"
+    _LABEL = "Binary output event with time"
 
     quality: BinaryQuality
     state: bool
     timestamp: DNP3Timestamp
 
-    def to_bytes(self) -> bytes:
-        """Serialize to 7 bytes."""
-        flags_byte = bytes([_build_flags(self.quality, self.state)])
-        return flags_byte + self.timestamp.to_bytes()
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryOutputEventTime":
-        """Parse from 7 bytes."""
-        if len(data) < SIZE_7_BYTES:
-            msg = f"Binary output event with time requires {SIZE_7_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        timestamp = DNP3Timestamp.from_bytes(data[1:7])
-        return cls(quality=quality, state=state, timestamp=timestamp)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class CROB(StaticObject):
+class CROB(FixedSizeObject, StaticObject):
     """Control Relay Output Block (g12v1).
 
     11-byte control command for binary output.
@@ -209,9 +147,10 @@ class CROB(StaticObject):
         status: Command status (typically 0 for requests).
     """
 
-    GROUP: ClassVar[int] = CROB_GROUP
-    VARIATION: ClassVar[int] = 1
-    SIZE: ClassVar[int] = SIZE_11_BYTES
+    GROUP = CROB_GROUP
+    VARIATION = 1
+    FORMAT = "<BBIIB"
+    _LABEL = "CROB"
 
     control_code: ControlCode
     count: int
@@ -234,41 +173,6 @@ class CROB(StaticObject):
         if not 0 <= self.off_time_ms <= self.MAX_TIME_MS:
             msg = f"Off time {self.off_time_ms} out of range (0-{self.MAX_TIME_MS})"
             raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 11 bytes.
-
-        Format: control(1) + count(1) + on_time(4) + off_time(4) + status(1)
-        """
-        return (
-            bytes([int(self.control_code), self.count])
-            + self.on_time_ms.to_bytes(4, byteorder="little")
-            + self.off_time_ms.to_bytes(4, byteorder="little")
-            + bytes([int(self.status)])
-        )
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "CROB":
-        """Parse from 11 bytes.
-
-        Raises:
-            ValueError: Fewer than 11 bytes, or an undefined Op Type in the control code.
-        """
-        if len(data) < SIZE_11_BYTES:
-            msg = f"CROB requires {SIZE_11_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        control_code = ControlCode(data[0])
-        count = data[1]
-        on_time_ms = int.from_bytes(data[2:6], byteorder="little")
-        off_time_ms = int.from_bytes(data[6:10], byteorder="little")
-        status = CommandStatus(data[10])
-        return cls(
-            control_code=control_code,
-            count=count,
-            on_time_ms=on_time_ms,
-            off_time_ms=off_time_ms,
-            status=status,
-        )
 
     @classmethod
     def pulse_on(

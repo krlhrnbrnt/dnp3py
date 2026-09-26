@@ -9,14 +9,29 @@ Object categories:
 - Event: Change events with optional timestamps (e.g., g2v1 Binary Input event)
 """
 
+import inspect
+import re
+import struct
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar, Self
 
 from dnp3.core.timestamp import DNP3Timestamp
 
 # Maximum byte value for group/variation validation
 MAX_BYTE_VALUE = 255
+
+# One struct format code with its optional repeat count, such as "B" or "6s"
+_FORMAT_CODE = re.compile(r"\d*[a-zA-Z?]")
+
+
+def _int_range(code: str) -> tuple[int, int]:
+    """Range of a struct integer code: signed for lowercase codes, unsigned for uppercase."""
+    bits = 8 * struct.calcsize("<" + code)
+    if code.islower():
+        return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    return 0, (1 << bits) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,20 +82,14 @@ class DNP3Object(ABC):
     def to_bytes(self) -> bytes:
         """Serialize the object to bytes.
 
-        Returns:
-            Object data as bytes.
+        Raises:
+            ValueError: If a field does not fit its wire format.
         """
 
     @classmethod
     @abstractmethod
-    def from_bytes(cls, data: bytes) -> "DNP3Object":
-        """Parse an object from bytes.
-
-        Args:
-            data: Raw bytes containing the object.
-
-        Returns:
-            Parsed object instance.
+    def from_bytes(cls, data: bytes) -> Self:
+        """Parse an object from the start of data.
 
         Raises:
             ValueError: If data is invalid or too short.
@@ -94,6 +103,86 @@ class DNP3Object(ABC):
             Size in bytes, or None if variable size.
         """
         return cls.SIZE
+
+
+class FixedSizeObject(DNP3Object):
+    """Base for dataclass objects whose wire layout is one little-endian ``struct`` format.
+
+    A subclass declares FORMAT with one code per field in declaration order (``6s`` for a DNP3Timestamp).
+    SIZE, to_bytes and from_bytes then follow from it, and _LABEL names the object in the too-short error.
+    Naming an integer field in _RANGE_FIELD sets MIN_VALUE and MAX_VALUE to the range of its format code
+    and checks the field against them on construction.
+    """
+
+    SIZE: ClassVar[int]
+    FORMAT: ClassVar[str]
+    MIN_VALUE: ClassVar[int]
+    MAX_VALUE: ClassVar[int]
+    _LABEL: ClassVar[str]
+    _LENGTH_MSG: ClassVar[str] = "{label} requires {size} {unit}, got {got}"
+    _RANGE_FIELD: ClassVar[str | None] = None
+    _RANGE_LABEL: ClassVar[str] = "Value"
+    _STRUCT: ClassVar[struct.Struct]
+    _DECODERS: ClassVar[tuple[Callable[[Any], Any], ...]]
+    _FIELD_NAMES: ClassVar[tuple[str, ...]]
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # A subclass that does not restate FORMAT keeps its parent's layout; its own annotations hold no fields.
+        if "FORMAT" not in cls.__dict__:
+            return
+        cls._STRUCT = struct.Struct(cls.FORMAT)
+        cls.SIZE = cls._STRUCT.size
+        # Dataclass fields are annotated with plain classes; ClassVar annotations are not classes.
+        field_types = {name: hint for name, hint in inspect.get_annotations(cls).items() if isinstance(hint, type)}
+        cls._FIELD_NAMES = tuple(field_types)
+        cls._DECODERS = tuple(DNP3Timestamp.from_bytes if t is DNP3Timestamp else t for t in field_types.values())
+        if cls._RANGE_FIELD is not None:
+            code = _FORMAT_CODE.findall(cls.FORMAT)[cls._FIELD_NAMES.index(cls._RANGE_FIELD)]
+            cls.MIN_VALUE, cls.MAX_VALUE = _int_range(code)
+
+    def __post_init__(self) -> None:
+        """Check _RANGE_FIELD against MIN_VALUE and MAX_VALUE."""
+        if self._RANGE_FIELD is None:
+            return
+        value = getattr(self, self._RANGE_FIELD)
+        if not self.MIN_VALUE <= value <= self.MAX_VALUE:
+            msg = f"{self._RANGE_LABEL} {value} out of range ({self.MIN_VALUE} to {self.MAX_VALUE})"
+            raise ValueError(msg)
+
+    def to_bytes(self) -> bytes:
+        """Serialize the object to bytes.
+
+        Raises:
+            ValueError: If a field does not fit its wire format.
+        """
+        try:
+            return self._STRUCT.pack(*self._pack())
+        except struct.error as exc:
+            raise ValueError(str(exc)) from exc
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Self:
+        """Parse an object from the start of data.
+
+        Raises:
+            ValueError: If data is invalid or too short.
+        """
+        size = cls._STRUCT.size
+        if len(data) < size:
+            unit = "byte" if size == 1 else "bytes"
+            raise ValueError(cls._LENGTH_MSG.format(label=cls._LABEL, size=size, unit=unit, got=len(data)))
+        return cls._unpack(cls._STRUCT.unpack_from(data))
+
+    def _pack(self) -> tuple[Any, ...]:
+        """Field values in FORMAT order, as struct.pack takes them."""
+        values = (getattr(self, name) for name in self._FIELD_NAMES)
+        return tuple(value.to_bytes() if isinstance(value, DNP3Timestamp) else value for value in values)
+
+    @classmethod
+    def _unpack(cls, values: tuple[Any, ...]) -> Self:
+        """Build an instance from the values struct.unpack returns for FORMAT."""
+        return cls(*(decode(value) for decode, value in zip(cls._DECODERS, values, strict=True)))
 
 
 class StaticObject(DNP3Object):

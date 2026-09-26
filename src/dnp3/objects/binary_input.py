@@ -11,17 +11,11 @@ Group 2: Binary Input Event
 """
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, Self
 
 from dnp3.core.flags import BinaryQuality
 from dnp3.core.timestamp import DNP3Timestamp
-from dnp3.objects.base import (
-    QUALITY_SIZE,
-    SIZE_1_BYTE,
-    SIZE_7_BYTES,
-    EventObject,
-    StaticObject,
-)
+from dnp3.objects.base import EventObject, FixedSizeObject, StaticObject
 from dnp3.objects.registry import register
 
 # Group numbers
@@ -36,22 +30,22 @@ RELATIVE_TIME_SIZE = 2
 STATE_BIT = 0x80
 
 
-def _extract_state(flags: int) -> bool:
-    """Extract binary state from flags byte."""
-    return bool(flags & STATE_BIT)
+class _BinaryFlags(FixedSizeObject):
+    """Packs the quality field (bits 0-6) and the state field (bit 7) into the leading flags byte."""
 
+    def _pack(self) -> tuple[Any, ...]:
+        quality, state, *rest = super()._pack()
+        return (int(quality) | (STATE_BIT if state else 0), *rest)
 
-def _build_flags(quality: BinaryQuality, state: bool) -> int:
-    """Build flags byte from quality and state."""
-    flags = int(quality)
-    if state:
-        flags |= STATE_BIT
-    return flags
+    @classmethod
+    def _unpack(cls, values: tuple[Any, ...]) -> Self:
+        flags, *rest = values
+        return super()._unpack((flags & ~STATE_BIT, bool(flags & STATE_BIT), *rest))
 
 
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryInputFlags(StaticObject):
+class BinaryInputFlags(_BinaryFlags, StaticObject):
     """Binary Input with flags (g1v2).
 
     Each point is 1 byte containing quality flags and state.
@@ -61,27 +55,13 @@ class BinaryInputFlags(StaticObject):
         state: Binary state (bit 7): False=off, True=on.
     """
 
-    GROUP: ClassVar[int] = BINARY_INPUT_STATIC_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_1_BYTE
+    GROUP = BINARY_INPUT_STATIC_GROUP
+    VARIATION = 2
+    FORMAT = "<B"
+    _LABEL = "Binary input"
 
     quality: BinaryQuality
     state: bool
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 1 byte."""
-        return bytes([_build_flags(self.quality, self.state)])
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryInputFlags":
-        """Parse from 1 byte."""
-        if len(data) < SIZE_1_BYTE:
-            msg = f"Binary input requires {SIZE_1_BYTE} byte, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        return cls(quality=quality, state=state)
 
     @property
     def is_online(self) -> bool:
@@ -91,7 +71,7 @@ class BinaryInputFlags(StaticObject):
 
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryInputEvent(EventObject):
+class BinaryInputEvent(_BinaryFlags, EventObject):
     """Binary Input Event without time (g2v1).
 
     Each event is 1 byte containing quality flags and state.
@@ -101,32 +81,18 @@ class BinaryInputEvent(EventObject):
         state: Binary state (bit 7): False=off, True=on.
     """
 
-    GROUP: ClassVar[int] = BINARY_INPUT_EVENT_GROUP
-    VARIATION: ClassVar[int] = 1
-    SIZE: ClassVar[int] = SIZE_1_BYTE
+    GROUP = BINARY_INPUT_EVENT_GROUP
+    VARIATION = 1
+    FORMAT = "<B"
+    _LABEL = "Binary input event"
 
     quality: BinaryQuality
     state: bool
 
-    def to_bytes(self) -> bytes:
-        """Serialize to 1 byte."""
-        return bytes([_build_flags(self.quality, self.state)])
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryInputEvent":
-        """Parse from 1 byte."""
-        if len(data) < SIZE_1_BYTE:
-            msg = f"Binary input event requires {SIZE_1_BYTE} byte, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        return cls(quality=quality, state=state)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryInputEventTime(EventObject):
+class BinaryInputEventTime(_BinaryFlags, EventObject):
     """Binary Input Event with absolute time (g2v2).
 
     Each event is 7 bytes: 1 byte flags + 6 byte timestamp.
@@ -137,35 +103,19 @@ class BinaryInputEventTime(EventObject):
         timestamp: Time when event occurred.
     """
 
-    GROUP: ClassVar[int] = BINARY_INPUT_EVENT_GROUP
-    VARIATION: ClassVar[int] = 2
-    SIZE: ClassVar[int] = SIZE_7_BYTES
+    GROUP = BINARY_INPUT_EVENT_GROUP
+    VARIATION = 2
+    FORMAT = "<B6s"
+    _LABEL = "Binary input event with time"
 
     quality: BinaryQuality
     state: bool
     timestamp: DNP3Timestamp
 
-    def to_bytes(self) -> bytes:
-        """Serialize to 7 bytes."""
-        flags_byte = bytes([_build_flags(self.quality, self.state)])
-        return flags_byte + self.timestamp.to_bytes()
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryInputEventTime":
-        """Parse from 7 bytes."""
-        if len(data) < SIZE_7_BYTES:
-            msg = f"Binary input event with time requires {SIZE_7_BYTES} bytes, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        timestamp = DNP3Timestamp.from_bytes(data[1:7])
-        return cls(quality=quality, state=state, timestamp=timestamp)
-
 
 @register
 @dataclass(frozen=True, slots=True)
-class BinaryInputEventRelativeTime(EventObject):
+class BinaryInputEventRelativeTime(_BinaryFlags, EventObject):
     """Binary Input Event with relative time (g2v3).
 
     Each event is 3 bytes: 1 byte flags + 2 byte relative time.
@@ -177,9 +127,10 @@ class BinaryInputEventRelativeTime(EventObject):
         relative_time_ms: Milliseconds since CTO (0-65535).
     """
 
-    GROUP: ClassVar[int] = BINARY_INPUT_EVENT_GROUP
-    VARIATION: ClassVar[int] = 3
-    SIZE: ClassVar[int] = QUALITY_SIZE + RELATIVE_TIME_SIZE
+    GROUP = BINARY_INPUT_EVENT_GROUP
+    VARIATION = 3
+    FORMAT = "<BH"
+    _LABEL = "Binary input event with relative time"
 
     quality: BinaryQuality
     state: bool
@@ -191,22 +142,3 @@ class BinaryInputEventRelativeTime(EventObject):
         if not 0 <= self.relative_time_ms <= max_relative_time:
             msg = f"Relative time {self.relative_time_ms} out of range (0-{max_relative_time})"
             raise ValueError(msg)
-
-    def to_bytes(self) -> bytes:
-        """Serialize to 3 bytes."""
-        flags_byte = bytes([_build_flags(self.quality, self.state)])
-        time_bytes = self.relative_time_ms.to_bytes(2, byteorder="little")
-        return flags_byte + time_bytes
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> "BinaryInputEventRelativeTime":
-        """Parse from 3 bytes."""
-        required = QUALITY_SIZE + RELATIVE_TIME_SIZE
-        if len(data) < required:
-            msg = f"Binary input event with relative time requires {required} bytes, got {len(data)}"
-            raise ValueError(msg)
-        flags = data[0]
-        quality = BinaryQuality(flags & 0x7F)
-        state = _extract_state(flags)
-        relative_time_ms = int.from_bytes(data[1:3], byteorder="little")
-        return cls(quality=quality, state=state, relative_time_ms=relative_time_ms)
