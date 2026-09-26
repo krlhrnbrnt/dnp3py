@@ -15,4 +15,6 @@ Plans stay out of the code history: the branch never touches `docs/plans/`, and 
 4. If the plan is wrong or incomplete, don't silently deviate: note the deviation and why, for the plan update below. If the work outgrows the plan, stop after a mergeable point and note the remainder for a new plan.
 5. Run the full `Done when` checklist: `uv run pytest tests/ --cov=src/dnp3 --cov-fail-under=95`, `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/`. Fix failures; don't skip hooks.
 
-Don't push or open a PR unless asked. When the branch is merged, squash-merge it into `main` as one conventional commit that describes the change itself. Then, as a separate `docs:` commit on `main` that touches only `docs/plans/`, tick the checklist, set `Status: done`, record any deviations, and add any follow-up plan. Finish with: branch name, commits made, check results, and any deviations from the plan.
+Stop on the branch. Don't merge, push or open a PR unless the user explicitly asks. Finish with: branch name, commits made, check results, and any deviations from the plan, then ask whether to merge.
+
+Only after the user says to merge: squash-merge the branch into `main` as one conventional commit that describes the change itself. Then, as a separate `docs:` commit on `main` that touches only `docs/plans/`, tick the checklist, set `Status: done`, record any deviations, and add any follow-up plan.
