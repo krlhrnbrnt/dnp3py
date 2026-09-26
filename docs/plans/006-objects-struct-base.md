@@ -1,0 +1,73 @@
+# 006: struct-based DNP3 object classes
+
+Status: todo
+Branch: refactor/objects-struct-base
+Depends on: 001
+
+## Goal
+Each fixed-size object class declares its wire layout once, as a `struct` format. The base class derives `SIZE`,
+`to_bytes`, `from_bytes` and the length and range checks. Class names, fields, ClassVars, module constants, wire
+bytes, exception types and messages stay the same, so this is not a breaking change.
+
+## Context
+- `src/dnp3/objects/`: 43 registered classes in `analog_input.py` (625 lines), `counter.py` (580),
+  `binary_output.py` (346), `binary_input.py` (212), `time.py` (204) and `class_data.py` (112). Each one hand-writes
+  `to_bytes`, `from_bytes`, an "at least N bytes" check and often `__post_init__` range checks.
+- Public attributes that must survive:
+  - `GROUP`, `VARIATION`, `SIZE` and `size()`;
+  - `MIN_VALUE`/`MAX_VALUE` where they exist today;
+  - CROB `MAX_COUNT`/`MAX_TIME_MS`;
+  - `is_online` properties;
+  - the `SIZE_*_BYTES` and `QUALITY_SIZE` constants in `base.py`;
+  - per-module constants: `TIMESTAMP_SIZE`, `SIZE_3_BYTES`, `SIZE_15_BYTES`, `STATE_BIT`, `RELATIVE_TIME_SIZE`, and
+    the group constants.
+- Messages that must survive exactly:
+  - length: `"<label> requires N bytes, got M"`, where the label varies per class (for example
+    "Analog input 32-bit", "Counter 16-bit");
+  - range: `"Value X out of range (lo to hi)"` for analog/counter and `"Delay X out of range (0 to 65535)"` for
+    g52;
+  - CROB (`"Count X out of range (0-255)"`, `"On time ..."`) and g2v3 relative time (`"(0-65535)"`) use a different
+    format and keep their own `__post_init__`.
+- Fields that don't map directly onto a `struct` code:
+  - Binary classes (g1v2, g2, g10v2, g11) pack `quality` (bits 0-6) and `state` (bit 7) into one flags byte.
+  - `DNP3Timestamp` is 48 bits (`src/dnp3/core/timestamp.py`); `struct` has no 6-byte integer code.
+  - Quality fields are `IntFlag` types (`AnalogQuality`, `CounterQuality`, `BinaryQuality`).
+- `struct.error` is not a `ValueError`. Range checks must stay explicit comparisons in `__post_init__` that raise
+  `ValueError`, exactly as today. Float fields and timestamps are not checked at construction today and must not
+  start being checked.
+
+## Steps
+1. Test (characterization, passes before and after):
+   `tests/unit/objects/test_base.py::test_object_contract_golden`. For every registered class, pin the following,
+   captured from `main`:
+   - `SIZE`, `MIN_VALUE` and `MAX_VALUE`;
+   - the `ValueError` message for 0-byte input and for an out-of-range value, where one applies;
+   - `to_bytes()` of a sample instance.
+2. Test: add a hypothesis property. For every registered fixed-size class, `from_bytes(obj.to_bytes()) == obj` and
+   `len(obj.to_bytes()) == cls.SIZE`.
+3. Implement in `base.py`:
+   - `DNP3Object.__init_subclass__`: when a subclass defines `FORMAT`, set `SIZE = struct.calcsize(FORMAT)`, and for
+     classes that declare `_RANGE_FIELD` set `MIN_VALUE`/`MAX_VALUE` from that field's integer format code.
+   - Default `to_bytes` is `struct.pack(FORMAT, *self._pack())`.
+   - Default `from_bytes` raises `ValueError(f"{cls._LABEL} requires {cls.SIZE} bytes, got {len(data)}")` on short
+     input, then calls `cls._unpack(struct.unpack_from(FORMAT, data))`.
+   - `_pack` and `_unpack` default to the dataclass fields in order. `IntFlag` fields are converted with `int(...)`
+     and `type(...)(...)`. A `DNP3Timestamp` field maps to format code `6s` through its own `to_bytes`/`from_bytes`.
+   - Default `__post_init__` range-checks `_RANGE_FIELD` (if set) against `MIN_VALUE`/`MAX_VALUE` and raises
+     `ValueError(f"{cls._RANGE_LABEL} {v} out of range ({lo} to {hi})")`.
+4. Implement, one file per commit, running that file's tests each time. Convert `counter.py`, `analog_input.py`,
+   `time.py` and `class_data.py` by declaring only `GROUP`, `VARIATION`, `FORMAT`, `_LABEL`, `_RANGE_FIELD`,
+   `_RANGE_LABEL` where needed, and the fields. Keep every public module constant.
+5. Implement: binary classes get one private `_BinaryFlags` mixin that overrides `_pack` and `_unpack` for the flags
+   byte. CROB and `BinaryInputEventRelativeTime` get `FORMAT` but keep their own `__post_init__`.
+6. Test: all existing `tests/unit/objects/*` and the whole suite pass with no test edits.
+
+## Out of scope
+- Removing any constant, ClassVar or base class (`StaticObject`, `EventObject`, `PointValue`, `TimestampedValue`).
+  That would be breaking.
+- g1v1 packed binary, which is not an object class.
+
+## Done when
+- [ ] new tests pass
+- [ ] `uv run pytest tests/` passes with no edits to existing tests, coverage >= 95%
+- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
