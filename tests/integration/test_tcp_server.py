@@ -10,6 +10,7 @@ Tests real TCP server/client communication including:
 import asyncio
 import contextlib
 import logging
+import sys
 
 import pytest
 
@@ -81,6 +82,7 @@ class TestTcpServerLifecycle:
         await server.stop()
         assert not server.is_listening
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows SO_REUSEADDR allows binding an in-use port")
     @pytest.mark.asyncio
     async def test_server_start_port_in_use(self) -> None:
         """Server raises error when port is in use."""
