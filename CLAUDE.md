@@ -82,6 +82,7 @@ Outstation and master sit above the application layer.
 - **TDD mandatory.** Write failing tests first, then implement, then refactor.
 - **Commit messages:** conventional commits format (`feat:`, `fix:`, `test:`, `refactor:`, `chore:`, `docs:`).
 - **Squash merge plan branches.** Commit per TDD step on the branch; squash into one conventional commit on merge.
+- **Plans stay separate.** Files in `docs/plans/` are committed only in their own `docs:` commits, never alongside code. Code, comments, tests and other commit messages never mention plans or plan numbers.
 - **Immutability preferred.** Create new objects rather than mutating.
 - **Line length:** 120 characters (ruff config).
 - **Quote style:** double quotes.
