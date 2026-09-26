@@ -13,8 +13,8 @@ repos:
       - id: debug-statements
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Pinned to match the ruff version installed in CI (see .github/workflows/ci.yml).
-    # Keep these two in sync: updating one requires updating the other.
+    # Pinned to match the ruff version installed in CI (see .github/workflows/ci.yml) and the
+    # pyproject.toml dev group. Keep all three in sync.
     rev: v0.15.18
     hooks:
       - id: ruff

@@ -27,10 +27,10 @@ MESA IEEE 1815.2 DER outstation simulator introduced in v0.2.0.
 pip install dnp3py
 ```
 
-Or with [pixi](https://pixi.sh):
+Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-pixi add dnp3py
+uv add dnp3py
 ```
 
 ## Quick Start
@@ -211,28 +211,29 @@ handling, see [docs/mesa-outstation.md](docs/mesa-outstation.md).
 git clone https://github.com/craig8/dnp3py.git
 cd dnp3py
 
-# Install with pixi
-pixi install
-pixi run dev-install
+# Create .venv with dev dependencies and an editable install
+uv sync
 
 # Set up pre-commit hooks (enforces quality checks before commits)
-pixi run pre-commit-install
+uv run pre-commit install
 
 # Run tests
-pixi run test
+uv run pytest tests/ -v
 
 # Run with coverage
-pixi run test-cov
+uv run pytest tests/ --cov=src/dnp3 --cov-fail-under=95
 
 # Lint and type check
-pixi run check
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
+uv run mypy src/
 
 # Test with specific Python version
-pixi run -e py310 test
-pixi run -e py312 test
+uv run --python 3.11 pytest tests/
+uv run --python 3.12 pytest tests/
 
 # Test all Python versions (via nox)
-pixi run nox
+uv run nox
 ```
 
 ### Project Structure

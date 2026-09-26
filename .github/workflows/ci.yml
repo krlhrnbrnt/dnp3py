@@ -66,8 +66,8 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          # Pin ruff to match .pre-commit-config.yaml rev so local and CI use identical formatting rules.
-          # Update both files together when upgrading.
+          # Pin ruff to match .pre-commit-config.yaml rev and the pyproject.toml dev group so local and CI
+          # use identical formatting rules. Update all three together when upgrading.
           pip install "ruff==0.15.18" mypy
 
       - name: Check formatting
