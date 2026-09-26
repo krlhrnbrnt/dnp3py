@@ -32,7 +32,7 @@ ANALOG_OUTPUT_DOUBLE_VARIATION = 4  # Double float
 # Qualifier constants
 QUALIFIER_1BYTE_INDEX = 0x17  # 1-byte count, 1-byte index prefix
 QUALIFIER_2BYTE_INDEX = 0x28  # 2-byte count, 2-byte index prefix
-MAX_1BYTE_INDEX = 255  # Maximum index for 1-byte qualifier
+MAX_1BYTE_INDEX = 255  # Maximum index or count for 1-byte qualifier
 
 
 class ControlMode(Enum):
@@ -115,13 +115,15 @@ class CommandTask(ABC):
 
 def _prefixed_block(group: int, variation: int, items: list[tuple[int, bytes]]) -> ObjectBlock:
     """Build an index-prefixed block from (index, object body) pairs."""
-    if max(index for index, _ in items) <= MAX_1BYTE_INDEX:
+    if max([len(items), *(index for index, _ in items)]) <= MAX_1BYTE_INDEX:
         qualifier, index_size = QUALIFIER_1BYTE_INDEX, 1
     else:
         qualifier, index_size = QUALIFIER_2BYTE_INDEX, 2
 
-    # Qualifier 0x28 requires a 2-byte count (IEEE 1815-2012 Table 4-3), but this still writes 1 byte.
-    data = bytes([len(items)]) + b"".join(index.to_bytes(index_size, "little") + body for index, body in items)
+    # The count field and each index prefix share one width: 1 byte for 0x17, 2 for 0x28 (IEEE 1815-2012 Table 4-3).
+    data = len(items).to_bytes(index_size, "little") + b"".join(
+        index.to_bytes(index_size, "little") + body for index, body in items
+    )
     return ObjectBlock(header=ObjectHeader(group=group, variation=variation, qualifier=qualifier), data=data)
 
 
