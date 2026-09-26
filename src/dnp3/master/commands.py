@@ -4,6 +4,7 @@ Provides classes for building and executing control commands
 including SELECT, OPERATE, and DIRECT_OPERATE.
 """
 
+import struct
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -97,6 +98,32 @@ class CommandTask(ABC):
         """
         self.operations.append(operation)
 
+    def _build_control_blocks(self) -> list[ObjectBlock]:
+        """Build a CROB block and an analog output block, omitting either when it has no operations."""
+        crobs = [
+            (op.index, struct.pack("<BBIIB", int(op.control_code), op.count, op.on_time, op.off_time, 0))
+            for op in self.operations
+            if not op.is_analog
+        ]
+        analogs = [(op.index, struct.pack("<iB", int(op.analog_value), 0)) for op in self.operations if op.is_analog]
+
+        blocks = [_prefixed_block(CROB_GROUP, CROB_VARIATION, crobs)] if crobs else []
+        if analogs:
+            blocks.append(_prefixed_block(ANALOG_OUTPUT_GROUP, ANALOG_OUTPUT_32_VARIATION, analogs))
+        return blocks
+
+
+def _prefixed_block(group: int, variation: int, items: list[tuple[int, bytes]]) -> ObjectBlock:
+    """Build an index-prefixed block from (index, object body) pairs."""
+    if max(index for index, _ in items) <= MAX_1BYTE_INDEX:
+        qualifier, index_size = QUALIFIER_1BYTE_INDEX, 1
+    else:
+        qualifier, index_size = QUALIFIER_2BYTE_INDEX, 2
+
+    # Qualifier 0x28 requires a 2-byte count (IEEE 1815-2012 Table 4-3), but this still writes 1 byte.
+    data = bytes([len(items)]) + b"".join(index.to_bytes(index_size, "little") + body for index, body in items)
+    return ObjectBlock(header=ObjectHeader(group=group, variation=variation, qualifier=qualifier), data=data)
+
 
 @dataclass
 class SelectTask(CommandTask):
@@ -109,86 +136,7 @@ class SelectTask(CommandTask):
 
     def build_request(self, seq: int = 0) -> RequestFragment:
         """Build SELECT request."""
-        blocks = self._build_control_blocks()
-        return build_select_request(objects=tuple(blocks), seq=seq)
-
-    def _build_control_blocks(self) -> list[ObjectBlock]:
-        """Build object blocks for control operations."""
-        blocks: list[ObjectBlock] = []
-
-        # Group by type
-        binary_ops = [op for op in self.operations if not op.is_analog]
-        analog_ops = [op for op in self.operations if op.is_analog]
-
-        if binary_ops:
-            blocks.append(self._build_crob_block(binary_ops))
-
-        if analog_ops:
-            blocks.append(self._build_analog_block(analog_ops))
-
-        return blocks
-
-    def _build_crob_block(self, operations: list[ControlOperation]) -> ObjectBlock:
-        """Build CROB object block."""
-        # Qualifier: 1-byte count, 1-byte index prefix
-        qualifier = (
-            QUALIFIER_1BYTE_INDEX if max(op.index for op in operations) <= MAX_1BYTE_INDEX else QUALIFIER_2BYTE_INDEX
-        )
-
-        data = bytearray()
-        # Count
-        data.append(len(operations))
-
-        for op in operations:
-            # Index (1 or 2 bytes)
-            if qualifier == QUALIFIER_1BYTE_INDEX:
-                data.append(op.index)
-            else:
-                data.extend(op.index.to_bytes(2, "little"))
-
-            # CROB: control code (1) + count (1) + on_time (4) + off_time (4) + status (1)
-            data.append(int(op.control_code))
-            data.append(op.count)
-            data.extend(op.on_time.to_bytes(4, "little"))
-            data.extend(op.off_time.to_bytes(4, "little"))
-            data.append(0)  # Status (request)
-
-        header = ObjectHeader(
-            group=CROB_GROUP,
-            variation=CROB_VARIATION,
-            qualifier=qualifier,
-        )
-        return ObjectBlock(header=header, data=bytes(data))
-
-    def _build_analog_block(self, operations: list[ControlOperation]) -> ObjectBlock:
-        """Build analog output object block."""
-        # Use 32-bit integer by default
-        qualifier = (
-            QUALIFIER_1BYTE_INDEX if max(op.index for op in operations) <= MAX_1BYTE_INDEX else QUALIFIER_2BYTE_INDEX
-        )
-
-        data = bytearray()
-        # Count
-        data.append(len(operations))
-
-        for op in operations:
-            # Index
-            if qualifier == QUALIFIER_1BYTE_INDEX:
-                data.append(op.index)
-            else:
-                data.extend(op.index.to_bytes(2, "little"))
-
-            # Value (32-bit signed) + status
-            int_value = int(op.analog_value)
-            data.extend(int_value.to_bytes(4, "little", signed=True))
-            data.append(0)  # Status
-
-        header = ObjectHeader(
-            group=ANALOG_OUTPUT_GROUP,
-            variation=ANALOG_OUTPUT_32_VARIATION,
-            qualifier=qualifier,
-        )
-        return ObjectBlock(header=header, data=bytes(data))
+        return build_select_request(objects=tuple(self._build_control_blocks()), seq=seq)
 
 
 @dataclass
@@ -202,74 +150,7 @@ class OperateTask(CommandTask):
 
     def build_request(self, seq: int = 0) -> RequestFragment:
         """Build OPERATE request."""
-        blocks = self._build_control_blocks()
-        return build_operate_request(objects=tuple(blocks), seq=seq)
-
-    def _build_control_blocks(self) -> list[ObjectBlock]:
-        """Build object blocks for control operations."""
-        # Same as SelectTask
-        blocks: list[ObjectBlock] = []
-        binary_ops = [op for op in self.operations if not op.is_analog]
-        analog_ops = [op for op in self.operations if op.is_analog]
-
-        if binary_ops:
-            blocks.append(self._build_crob_block(binary_ops))
-        if analog_ops:
-            blocks.append(self._build_analog_block(analog_ops))
-
-        return blocks
-
-    def _build_crob_block(self, operations: list[ControlOperation]) -> ObjectBlock:
-        """Build CROB object block."""
-        qualifier = (
-            QUALIFIER_1BYTE_INDEX if max(op.index for op in operations) <= MAX_1BYTE_INDEX else QUALIFIER_2BYTE_INDEX
-        )
-        data = bytearray()
-        data.append(len(operations))
-
-        for op in operations:
-            if qualifier == QUALIFIER_1BYTE_INDEX:
-                data.append(op.index)
-            else:
-                data.extend(op.index.to_bytes(2, "little"))
-
-            data.append(int(op.control_code))
-            data.append(op.count)
-            data.extend(op.on_time.to_bytes(4, "little"))
-            data.extend(op.off_time.to_bytes(4, "little"))
-            data.append(0)
-
-        header = ObjectHeader(
-            group=CROB_GROUP,
-            variation=CROB_VARIATION,
-            qualifier=qualifier,
-        )
-        return ObjectBlock(header=header, data=bytes(data))
-
-    def _build_analog_block(self, operations: list[ControlOperation]) -> ObjectBlock:
-        """Build analog output object block."""
-        qualifier = (
-            QUALIFIER_1BYTE_INDEX if max(op.index for op in operations) <= MAX_1BYTE_INDEX else QUALIFIER_2BYTE_INDEX
-        )
-        data = bytearray()
-        data.append(len(operations))
-
-        for op in operations:
-            if qualifier == QUALIFIER_1BYTE_INDEX:
-                data.append(op.index)
-            else:
-                data.extend(op.index.to_bytes(2, "little"))
-
-            int_value = int(op.analog_value)
-            data.extend(int_value.to_bytes(4, "little", signed=True))
-            data.append(0)
-
-        header = ObjectHeader(
-            group=ANALOG_OUTPUT_GROUP,
-            variation=ANALOG_OUTPUT_32_VARIATION,
-            qualifier=qualifier,
-        )
-        return ObjectBlock(header=header, data=bytes(data))
+        return build_operate_request(objects=tuple(self._build_control_blocks()), seq=seq)
 
 
 @dataclass
@@ -283,73 +164,7 @@ class DirectOperateTask(CommandTask):
 
     def build_request(self, seq: int = 0) -> RequestFragment:
         """Build DIRECT_OPERATE request."""
-        blocks = self._build_control_blocks()
-        return build_direct_operate_request(objects=tuple(blocks), seq=seq)
-
-    def _build_control_blocks(self) -> list[ObjectBlock]:
-        """Build object blocks for control operations."""
-        blocks: list[ObjectBlock] = []
-        binary_ops = [op for op in self.operations if not op.is_analog]
-        analog_ops = [op for op in self.operations if op.is_analog]
-
-        if binary_ops:
-            blocks.append(self._build_crob_block(binary_ops))
-        if analog_ops:
-            blocks.append(self._build_analog_block(analog_ops))
-
-        return blocks
-
-    def _build_crob_block(self, operations: list[ControlOperation]) -> ObjectBlock:
-        """Build CROB object block."""
-        qualifier = (
-            QUALIFIER_1BYTE_INDEX if max(op.index for op in operations) <= MAX_1BYTE_INDEX else QUALIFIER_2BYTE_INDEX
-        )
-        data = bytearray()
-        data.append(len(operations))
-
-        for op in operations:
-            if qualifier == QUALIFIER_1BYTE_INDEX:
-                data.append(op.index)
-            else:
-                data.extend(op.index.to_bytes(2, "little"))
-
-            data.append(int(op.control_code))
-            data.append(op.count)
-            data.extend(op.on_time.to_bytes(4, "little"))
-            data.extend(op.off_time.to_bytes(4, "little"))
-            data.append(0)
-
-        header = ObjectHeader(
-            group=CROB_GROUP,
-            variation=CROB_VARIATION,
-            qualifier=qualifier,
-        )
-        return ObjectBlock(header=header, data=bytes(data))
-
-    def _build_analog_block(self, operations: list[ControlOperation]) -> ObjectBlock:
-        """Build analog output object block."""
-        qualifier = (
-            QUALIFIER_1BYTE_INDEX if max(op.index for op in operations) <= MAX_1BYTE_INDEX else QUALIFIER_2BYTE_INDEX
-        )
-        data = bytearray()
-        data.append(len(operations))
-
-        for op in operations:
-            if qualifier == QUALIFIER_1BYTE_INDEX:
-                data.append(op.index)
-            else:
-                data.extend(op.index.to_bytes(2, "little"))
-
-            int_value = int(op.analog_value)
-            data.extend(int_value.to_bytes(4, "little", signed=True))
-            data.append(0)
-
-        header = ObjectHeader(
-            group=ANALOG_OUTPUT_GROUP,
-            variation=ANALOG_OUTPUT_32_VARIATION,
-            qualifier=qualifier,
-        )
-        return ObjectBlock(header=header, data=bytes(data))
+        return build_direct_operate_request(objects=tuple(self._build_control_blocks()), seq=seq)
 
 
 class CommandBuilder:
