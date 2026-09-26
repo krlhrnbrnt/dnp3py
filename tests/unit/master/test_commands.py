@@ -534,6 +534,43 @@ class TestCommandTaskPolymorphism:
         assert block.header.group == ANALOG_OUTPUT_GROUP
         assert block.header.variation == ANALOG_OUTPUT_32_VARIATION
 
+    @pytest.mark.parametrize(
+        ("high_index", "expected"),
+        [
+            # Qualifier 0x28 calls for a 2-byte count (IEEE 1815-2012 Table 4-3); these bytes pin the
+            # current 1-byte count.
+            (
+                300,
+                [
+                    bytes.fromhex(
+                        "0c0128" + "02" + "0300" + "0102e8030000f401000000" + "2c01" + "0401000000000000000000"
+                    ),
+                    bytes.fromhex("290128" + "02" + "0300" + "2efbffff00" + "2c01" + "7011010000"),
+                ],
+            ),
+            (
+                255,
+                [
+                    bytes.fromhex("0c0117" + "02" + "03" + "0102e8030000f401000000" + "ff" + "0401000000000000000000"),
+                    bytes.fromhex("290117" + "02" + "03" + "2efbffff00" + "ff" + "7011010000"),
+                ],
+            ),
+        ],
+        ids=["0x28", "0x17"],
+    )
+    def test_all_task_types_encode_identical_blocks(self, high_index: int, expected: list[bytes]) -> None:
+        """SELECT, OPERATE and DIRECT_OPERATE carry byte-identical object blocks."""
+        operations = [
+            ControlOperation(index=3, control_code=ControlCode.PULSE_ON, count=2, on_time=1000, off_time=500),
+            ControlOperation(index=high_index, control_code=ControlCode.LATCH_OFF),
+            ControlOperation(index=3, analog_value=-1234.7, is_analog=True),
+            ControlOperation(index=high_index, analog_value=70000, is_analog=True),
+        ]
+
+        for task_type in (SelectTask, OperateTask, DirectOperateTask):
+            fragment = task_type(operations=list(operations)).build_request()
+            assert [block.to_bytes() for block in fragment.objects] == expected, task_type.__name__
+
 
 class TestCROBConstants:
     """Tests for CROB constants."""
