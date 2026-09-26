@@ -1,6 +1,6 @@
 # 001: Master decodes measurements through the object classes
 
-Status: todo
+Status: done
 Branch: fix/master-decode-via-registry
 Depends on: none
 
@@ -33,6 +33,9 @@ unchanged.
     - g40 v1, v2, v3 and v4 → g30 v1, v2, v5 and v6;
     - g42 vN → g32 vN;
     - g11v3 → g2v3. This is not in the spec, but the master decodes it today, so keep it.
+    - g40v5 → g30v5 and g40v6 → g30v6, for the same reason. (Added during implementation: the old static analog
+      table covered v5/v6 for g40 too, so the golden test pins them.)
+  - `_ABSOLUTE_TIMESTAMP_WIDTH` and the `struct` import also become unused and are deleted.
 - No-flag classes have no `quality`: `Counter32NoFlag`, `Counter16NoFlag`, `AnalogInput32NoFlag` and
   `AnalogInput16NoFlag`.
 - Ruff B009 forbids `getattr(obj, "value")`. Read fields through a `typing.Protocol` and `cast`.
@@ -58,6 +61,13 @@ unchanged.
    - Delete the private tables and helpers listed under Context.
 6. Test: all existing `tests/unit/master/*` and `tests/integration/test_tcp_master_values_e2e.py` pass unchanged.
 
+## Implementation notes
+- The three `_parse_*` methods share one private `_decode_block(block)` that returns `(index, object)` pairs.
+- `tests/unit/objects/test_registry.py`'s autouse `clean_registry` fixture emptied the global registry and never
+  restored it, so master tests running after it saw no classes. It now swaps in an empty dict with `monkeypatch`.
+- On Windows, three unrelated tests fail before and after this plan (port reuse, cp1252 file read, connection
+  refused timing). CI runs on Linux and macOS.
+
 ## Out of scope
 - Deprecating the now-unused public `AnalogValueSpec`, `CounterValueSpec` and `GROUP_TIME_DELAY`. Removing them would
   be breaking.
@@ -65,6 +75,6 @@ unchanged.
 - Rewriting the object classes (plan 006).
 
 ## Done when
-- [ ] new tests pass (golden, g21v5/v6, g40v3/v4)
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass (golden, g21v5/v6, g40v3/v4)
+- [x] `uv run pytest tests/` passes, coverage >= 95% (97.01%; see Windows note above)
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
