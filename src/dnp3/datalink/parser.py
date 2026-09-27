@@ -15,6 +15,7 @@ from dnp3.datalink.frame import (
     DATA_BLOCK_SIZE,
     HEADER_SIZE,
     HEADER_SIZE_NO_CRC,
+    LENGTH_FIELD_OVERHEAD,
     DataLinkFrame,
     DataLinkHeader,
 )
@@ -193,48 +194,49 @@ class FrameParser:
         Returns:
             A DataLinkFrame if one is complete, None otherwise.
         """
-        # Hunt for start bytes
-        start_pos = _find_start_bytes(self._buffer)
-        if start_pos == -1:
-            # No start bytes found, keep last byte in case it's the first start byte
-            if len(self._buffer) > 0 and self._buffer[-1] == _START_BYTE_0:
-                self._buffer = bytearray([_START_BYTE_0])
-            else:
-                self._buffer.clear()
-            return None
+        while True:
+            # Hunt for start bytes
+            start_pos = _find_start_bytes(self._buffer)
+            if start_pos == -1:
+                # No start bytes found, keep last byte in case it's the first start byte
+                if len(self._buffer) > 0 and self._buffer[-1] == _START_BYTE_0:
+                    self._buffer = bytearray([_START_BYTE_0])
+                else:
+                    self._buffer.clear()
+                return None
 
-        # Discard bytes before start
-        if start_pos > 0:
-            del self._buffer[:start_pos]
+            # Discard bytes before start
+            if start_pos > 0:
+                del self._buffer[:start_pos]
 
-        # Need at least header
-        if len(self._buffer) < HEADER_SIZE:
-            return None
+            # Need at least header
+            if len(self._buffer) < HEADER_SIZE:
+                return None
 
-        # Validate header CRC
-        if not _validate_header_crc(bytes(self._buffer[:HEADER_SIZE])):
-            # Bad CRC - skip first byte and hunt again
-            del self._buffer[0]
-            return self._try_parse_frame()
+            # Bad header - skip first byte and hunt again. IEEE 1815-2012 Clause 9: LENGTH counts CONTROL,
+            # DESTINATION and SOURCE, so it is at least 5.
+            if not _validate_header_crc(bytes(self._buffer[:HEADER_SIZE])) or self._buffer[2] < LENGTH_FIELD_OVERHEAD:
+                del self._buffer[0]
+                continue
 
-        # Parse header to get expected frame size
-        header = DataLinkHeader.from_bytes(bytes(self._buffer[:HEADER_SIZE_NO_CRC]))
-        frame_size = _calculate_frame_size(header.user_data_length)
+            # Parse header to get expected frame size
+            header = DataLinkHeader.from_bytes(bytes(self._buffer[:HEADER_SIZE_NO_CRC]))
+            frame_size = _calculate_frame_size(header.user_data_length)
 
-        # Wait for complete frame
-        if len(self._buffer) < frame_size:
-            return None
+            # Wait for complete frame
+            if len(self._buffer) < frame_size:
+                return None
 
-        # Extract and validate data blocks
-        data_start = HEADER_SIZE
-        data_bytes = bytes(self._buffer[data_start:frame_size])
-        user_data = _extract_user_data(data_bytes, header.user_data_length)
+            # Extract and validate data blocks
+            data_start = HEADER_SIZE
+            data_bytes = bytes(self._buffer[data_start:frame_size])
+            user_data = _extract_user_data(data_bytes, header.user_data_length)
 
-        if user_data is None:
-            # Data block CRC failed - skip first byte and hunt again
-            del self._buffer[0]
-            return self._try_parse_frame()
+            if user_data is None:
+                # Data block CRC failed - skip first byte and hunt again
+                del self._buffer[0]
+                continue
 
-        # Success - consume frame from buffer and return
-        del self._buffer[:frame_size]
-        return DataLinkFrame(header=header, user_data=user_data)
+            # Success - consume frame from buffer and return
+            del self._buffer[:frame_size]
+            return DataLinkFrame(header=header, user_data=user_data)

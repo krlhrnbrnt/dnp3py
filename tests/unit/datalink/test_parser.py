@@ -1,8 +1,27 @@
 """Tests for data link frame parser."""
 
+from itertools import pairwise
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
 from dnp3.datalink.control import ControlByte
-from dnp3.datalink.frame import DataLinkFrame
+from dnp3.datalink.frame import START_BYTES, DataLinkFrame, DataLinkHeader
 from dnp3.datalink.parser import FrameParser
+
+
+def _good_frame(user_data: bytes) -> DataLinkFrame:
+    return DataLinkFrame.build(
+        destination=1,
+        source=2,
+        control=ControlByte.from_int(0xC4),
+        user_data=user_data,
+    )
+
+
+def _header_with_length(length: int) -> bytes:
+    return DataLinkHeader(length, ControlByte.from_int(0xC4), 1, 2).to_bytes()
 
 
 class TestFrameParserBasic:
@@ -221,3 +240,57 @@ class TestFrameParserErrors:
         # Should skip the corrupted frame and parse the second one
         assert len(frames) == 1
         assert frames[0].user_data == b"also good"
+
+    def test_garbage_then_valid_frame_is_recovered(self) -> None:
+        """A valid frame after 8 KB of start-byte garbage is still yielded, without deep recursion."""
+        good = _good_frame(b"after the junk")
+        parser = FrameParser()
+        assert list(parser.feed(START_BYTES * 4096 + good.to_bytes())) == [good]
+        assert parser.bytes_buffered == 0
+
+    def test_data_block_crc_failure_resyncs_iteratively(self) -> None:
+        """Frames whose last data block CRC is bad are skipped without deep recursion."""
+        bad = bytearray(_good_frame(START_BYTES * 100).to_bytes())
+        bad[-1] ^= 0xFF
+        good = _good_frame(b"survivor")
+        parser = FrameParser()
+        assert list(parser.feed(bytes(bad) * 50 + good.to_bytes())) == [good]
+
+    @pytest.mark.parametrize("length", range(5))
+    def test_length_below_minimum_is_rejected(self, length: int) -> None:
+        """A CRC-valid header whose LENGTH can't cover CONTROL, DESTINATION and SOURCE is skipped entirely."""
+        good = _good_frame(b"next")
+        parser = FrameParser()
+        assert list(parser.feed(_header_with_length(length) + good.to_bytes())) == [good]
+        assert parser.bytes_buffered == 0
+
+    def test_length_five_is_smallest_legal(self) -> None:
+        """LENGTH 5 is a header with no user data and still yields a frame."""
+        assert [f.user_data for f in FrameParser().feed(_header_with_length(5))] == [b""]
+
+    def test_garbage_then_frame_split_across_feeds(self) -> None:
+        """A frame split across two feeds right after garbage is still yielded."""
+        good = _good_frame(b"split after junk").to_bytes()
+        data = START_BYTES * 512 + good
+        for cut in range(len(data) - len(good), len(data)):
+            parser = FrameParser()
+            frames = list(parser.feed(data[:cut])) + list(parser.feed(data[cut:]))
+            assert [f.user_data for f in frames] == [b"split after junk"]
+
+    _stream_pieces = st.one_of(
+        st.binary(max_size=512),
+        st.integers(1, 2048).map(lambda n: START_BYTES * n),
+        st.binary(max_size=250).map(lambda d: _good_frame(d).to_bytes()),
+        st.integers(0, 255).map(_header_with_length),
+    )
+
+    @given(st.lists(_stream_pieces, max_size=8), st.lists(st.integers(0, 16384), max_size=8))
+    def test_feed_never_raises(self, pieces: list[bytes], cuts: list[int]) -> None:
+        """Mixed garbage, valid frames and bogus headers never raise and only yield well-formed frames."""
+        stream = b"".join(pieces)
+        bounds = [0, *sorted(c % (len(stream) + 1) for c in cuts), len(stream)]
+        parser = FrameParser()
+        for start, end in pairwise(bounds):
+            for frame in parser.feed(stream[start:end]):
+                assert frame.header.length >= 5
+                assert len(frame.user_data) == frame.header.user_data_length
