@@ -1,6 +1,6 @@
 # 013: Report what the master could not parse
 
-Status: todo
+Status: done
 Branch: fix/report-unparsed-response-data
 Depends on: 010, 011, 012 (so the groups a Level 2 outstation sends are sized before unknown ones stop being
 absorbed)
@@ -85,6 +85,37 @@ This lets a test engineer tell "the outstation didn't send it" from "the master 
 - The unused `dnp3.core.exceptions.ParseError` (upstream #67).
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- A RESERVED_QUALIFIER report carries the object header. The header decodes; only its `range_code` and
+  `prefix_code` properties can raise. Keeping it lets the warning name the group and variation. `header` is None
+  only when fewer than 3 bytes remain, which is now reported as TRUNCATED instead of dropped silently.
+- Reserved qualifiers are checked from the qualifier bits (range 0xA and 0xC-0xF, prefix 7) before the width
+  lookup. Choosing the reason by whether `RangeCode` has a member reported 0xA as UNKNOWN_OBJECT. Range codes 3-5
+  and 0xB are defined by the spec but have no width here, so they report UNKNOWN_OBJECT.
+- A fourth reason, `INVALID_RANGE`: a start-stop range with stop below start has no extent, but the block was
+  returned with every later block's bytes as its data. It is now reported and not returned. TRUNCATED blocks are
+  still kept with the bytes present.
+- `parse_response_object_blocks` is removed rather than kept as a wrapper. Nothing outside the tests called it,
+  and it dropped the report. Tests read `parse_response(...).objects`.
+- `_ALIASES` is removed from `master.py`. g11v3, g40v5 and g40v6 are not defined by the spec and have no parser
+  width, so after step 2 they never reached the master decoder. They are reported as UNKNOWN_OBJECT and their
+  `test_decoded_values_golden` entries are gone.
+- The step 1 assertion that `objects` holds only the g1v2 block moved to step 2, since step 1 still kept the
+  absorbing block. Step 2 also rewrote `test_packed_with_index_prefix_is_unsized`,
+  `test_octet_string_variation_zero_is_unsized` and `test_unregistered_trailing_block_is_not_dropped` (now
+  `_is_reported`), and renamed the 0x0B test to `test_variable_format_range_is_reported_not_returned`.
+- The warning gives the offset out of the object data length rather than a count of bytes not parsed, since a
+  truncated block's whole objects are still delivered.
+- `test_process_response_total` also draws bodies behind a valid response header, so the object parser is
+  reached. A 100,000-example structured run found no exception other than `ParseError`, so there was no parser fix
+  and no `@example`.
+- Added, from review: `UnparsedData` and `UnparsedReason` are exported from `dnp3.application`; a solicited
+  response whose first block is unknown still completes its task; the known-blocks property test also checks
+  `unparsed is None`.
+- No follow-up plan. Found in review, older than this work and not planned: qualifier bit 7 is ignored, so 0x80
+  parses as 0x00; `parse_response` accepts non-response function codes; `RangeCode` names 3-5 RESERVED and puts
+  VIRTUAL_ADDRESS on 0xB, which the spec defines as variable format.
