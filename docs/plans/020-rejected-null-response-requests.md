@@ -8,13 +8,17 @@ Depends on: 014 (adds `startup()`, which this plan makes use the new methods)
 Three runner methods: `clear_restart()`, `enable_unsolicited()` and `disable_unsolicited()`. Each sends its request
 and raises `RequestRejectedError` when the answer carries a request-error IIN bit (function not supported, object
 unknown, parameter error). `clear_restart()` also raises if DEVICE_RESTART is still set afterwards. `startup()` uses
-them, so a rejected startup step raises instead of passing silently.
+them, so a rejected startup step raises instead of only being logged.
 
 ## Context
-- `src/dnp3/master/tcp_runner.py` `MasterTcpRunner.request()` (`:201`) returns `list[ResponseInfo]` and does not
-  judge IIN. Keep it that way: a READ can return good data alongside OBJECT_UNKNOWN.
-- Plan 014 adds `startup()` (disable unsolicited, time sync, integrity poll, enable unsolicited, all through
-  `request()`), plus `time_sync()` and `TimeSyncError(MasterRunnerError)`.
+- `src/dnp3/master/tcp_runner.py` `MasterTcpRunner.request()` (`:252`) returns `list[ResponseInfo]` and does not
+  judge IIN. Keep it that way: a READ can return good data alongside OBJECT_UNKNOWN. Its body is `_exchange()`
+  (`:275`), which runs with the channel already claimed.
+- From plan 014, in `tcp_runner.py`:
+  - `startup()` (`:210`) sends DISABLE_UNSOLICITED and ENABLE_UNSOLICITED through `request()` and logs a rejection
+    with `_warn_if_rejected()` (`:793`);
+  - `time_sync()` raises `TimeSyncError(MasterRunnerError)` through `_raise_if_rejected()` (`:785`);
+  - `_REJECTED` (`:74`) holds the three request-error bits.
 - `src/dnp3/master/master.py` has `build_enable_unsolicited()` and `build_disable_unsolicited()`, but no clear-restart
   builder. `src/dnp3/application/builder.py` has the request builders.
 - Clear restart is a WRITE of g80v1 with qualifier 0x00, start 7, stop 7 and one data octet 0x00: IIN bit 7 is
@@ -45,11 +49,13 @@ them, so a rejected startup step raises instead of passing silently.
    Implement:
    - `RequestRejectedError(MasterRunnerError)` with `iin: IIN`;
    - a private `_request_accepted(request, *, must_clear: IIN = IIN(0))`, which runs `request()` and raises on a
-     request-error bit, or on any `must_clear` bit still set, in the last fragment;
+     `_REJECTED` bit, or on any `must_clear` bit still set, in the last fragment;
    - the three public methods on it. Export `RequestRejectedError` from `dnp3.master`.
-3. Test: `TestStartup::test_rejected_enable_unsolicited_raises` (the class from plan 014): the fake answers
-   ENABLE_UNSOLICITED with NO_FUNC_CODE_SUPPORT, and `startup()` raises `RequestRejectedError`.
-   Implement: `startup()` calls `disable_unsolicited()` and `enable_unsolicited()`.
+3. Test: `TestStartup::test_rejected_unsolicited_control_raises` replaces `test_rejected_unsolicited_control_is_logged`,
+   keeping its parametrization over DISABLE_UNSOLICITED and ENABLE_UNSOLICITED: the fake answers with
+   NO_FUNC_CODE_SUPPORT, and `startup()` raises `RequestRejectedError`.
+   Implement: `startup()` calls `disable_unsolicited()` and `enable_unsolicited()`. Delete `_warn_if_rejected()` and
+   the `startup()` docstring sentence saying those rejections are logged, not raised.
 4. Test, end to end: `tests/integration/test_tcp_master_runner_e2e.py::test_clear_restart_against_outstation`: the
    first integrity poll's `info.iin` has DEVICE_RESTART. `clear_restart()` returns, and the next poll's `info.iin`
    does not have it.

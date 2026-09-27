@@ -15,13 +15,13 @@ Explicit calls (`request()`, `integrity_poll()`, `listen_unsolicited()` and the 
 so a script driving the outstation step by step keeps full control. Defaults match opendnp3.
 
 ## Context
-- `src/dnp3/master/tcp_runner.py` `run_polls()` (`:310`): it takes the next due task from the scheduler, or idles
+- `src/dnp3/master/tcp_runner.py` `run_polls()` (`:435`): it takes the next due task from the scheduler, or idles
   listening for unsolicited responses. A failed poll is logged and retried after `poll_retry_delay`, and
   `ConnectionLostError` ends the loop.
-- `src/dnp3/master/master.py` `_process_response_fragment` (`:502`) sees every solicited and unsolicited response:
+- `src/dnp3/master/master.py` `_process_response_fragment` (`:595`) sees every solicited and unsolicited response:
   the runner routes both through `process_response`.
-- Reused config (`src/dnp3/master/config.py`): `startup_integrity_poll` (`:62`), `enable_unsolicited_on_startup`
-  (`:64`), and `time_sync_method` (from plan 014).
+- Reused config (`src/dnp3/master/config.py`): `startup_integrity_poll` (`:77`), `enable_unsolicited_on_startup`
+  (`:79`), and `time_sync_method` (from plan 014).
 - opendnp3 reference:
   - `MContext::ProcessIIN` runs on every response, unsolicited included;
   - a restart demands clear restart, the startup integrity poll and enable unsolicited;
@@ -29,8 +29,9 @@ so a script driving the outstation step by step keeps full control. Defaults mat
   - NEED_TIME demands a time sync only when a sync mode is configured (default none);
   - task priority order: clear restart, integrity, time sync, enable unsolicited, then user polls.
 - The in-repo outstation starts with DEVICE_RESTART and NEED_TIME set (`src/dnp3/outstation/state.py:216`).
-- Test helpers: `FakeOutstation`, `make_runner`, `idle_scheduler`, and `TestScheduledPolls` (`:879`) in
-  `tests/unit/master/test_tcp_runner.py`.
+- Test helpers in `tests/unit/master/test_tcp_runner.py`: `FakeOutstation`, `make_runner`, `idle_scheduler` and
+  `TestScheduledPolls` (`:891`), plus `open_runner` (`:1419`) and `answer_requests` (`:1383`), which answers each
+  request in turn by function code, and records them.
 
 ## Steps
 1. Test: `tests/unit/master/test_config.py::test_iin_reaction_defaults`: `react_to_restart` is True,

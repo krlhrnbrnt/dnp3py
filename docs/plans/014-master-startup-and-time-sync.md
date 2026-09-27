@@ -1,6 +1,6 @@
 # 014: Master startup sequence and time synchronization
 
-Status: todo
+Status: done
 Branch: feat/master-startup-time-sync
 Depends on: none
 
@@ -110,6 +110,33 @@ of them has a consumer.
 - `MasterConfig.enable_unsolicited` ("Accept unsolicited responses"). It stays unwired here.
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- No IEEE 1815-2012 section number in the docstrings. Neither the repo nor a web search confirmed the time
+  synchronization clause number, so the docstrings name the procedures. Add the number when someone has the spec.
+- `time_delay_ms` is decoded in `_process_response_fragment` and passed to the `ResponseInfo` constructor, not set in
+  `_parse_response_objects`. The info is not changed after construction, and handlers see the field set.
+- The review focus premise was off. The gap between the two requests costs nothing, since neither procedure depends
+  on it. What cost accuracy was reading the clock before `request()` waited for the channel lock: the LAN procedure
+  wrote a stale send time, and the non-LAN procedure counted the wait as round trip. `request()`'s body is now
+  `_exchange()`, and each time sync step reads the clock and exchanges under one `_claim()`. The lock is still not
+  held across both requests. `test_clock_read_once_the_channel_is_held` pins this for both methods.
+- A rejected DELAY_MEASURE also raises `TimeSyncError`. Rejected means NO_FUNC_CODE_SUPPORT, OBJECT_UNKNOWN or
+  PARAMETER_ERROR in the last fragment's IIN (`_REJECTED`).
+- `startup()` logs a rejected DISABLE_UNSOLICITED or ENABLE_UNSOLICITED instead of dropping it silently, and its
+  docstring says any other failure stops the sequence. Plan 020 turns the log into a raise.
+- The LAN NO_FUNC_CODE_SUPPORT message names `MasterConfig.time_sync_method` and `TimeSyncMethod.NON_LAN`. The
+  README lists RECORD_CURRENT_TIME as master only.
+- Tests: `make_runner` takes `**config_options`, and the e2e `_poll_over_tcp` wraps a new `_runner_over_tcp` context
+  manager. Added beyond the steps: rejected DELAY_MEASURE, the default wall clock, the clock read under the lock, g52
+  blocks with no value (count 0, qualifier 0x06), a builder-level RECORD_CURRENT_TIME test, the `time_sync_method`
+  default, a logged rejection in `startup()`, and a g50v3 entry in `test_base.py`'s golden table, which
+  `test_golden_covers_every_registered_class` requires. The two write-time byte tests are one parametrized
+  `test_build_write_time`.
+- Follow-up plans: 023 (the in-repo outstation keeps a clock that time sync sets, so the default LAN method works
+  against it) and 024 (an integrity poll resets the scheduled one, and a task never run is due at once). Not
+  planned: the non-LAN round trip is timed on the wall clock, so a clock step during the exchange skews the delay.
+  Timing it on `time.monotonic()` would need a second injectable clock.
