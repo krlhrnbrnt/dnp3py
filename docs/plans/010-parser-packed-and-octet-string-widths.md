@@ -1,6 +1,6 @@
 # 010: Response parser sizes packed and octet-string blocks
 
-Status: todo
+Status: done
 Branch: fix/parser-packed-widths
 Depends on: none
 
@@ -67,8 +67,8 @@ but not these.
 ## Review focus
 - Packed blocks with a start index other than 0, e.g. start 5 stop 14. Count is `stop - start + 1`. Add that case to
   step 1's test data.
-- A count of 0 (stop < start is impossible with unsigned ranges, but a UINT8_COUNT of 0 is possible). It must
-  consume only the range bytes.
+- A count of 0 (a UINT8_COUNT of 0). It must consume only the range bytes.
+- Stop below start. Each field is unsigned, but the wire can still carry stop < start, which gives a negative count.
 
 ## Out of scope
 - Double-bit packed g3v1 (plan 012 adds `(3, 1): 2` to the same table).
@@ -76,6 +76,21 @@ but not these.
 - Reporting a block whose width stays unknown (plan 013).
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- No `_packed_block_size` helper: the one-line size calculation sits inline in `_parse_object_block`, which gained
+  an optional `bits_per_point` parameter. A separate `_lookup_packed_bits(header)` does the table lookup and returns
+  None unless the block has no prefix and a decodable range.
+- `_range_is_decodable(range_code)` was extracted so `_lookup_object_size` and `_lookup_packed_bits` share the range
+  check. Without it in the packed lookup, g1v1 with an undecodable range (e.g. qualifier 0x0B) would consume only
+  its header.
+- Steps 2-4 passed on first run: step 1's implementation already covered them.
+- Added, from review: a start-stop range with stop < start raises `ParseError` on the sized paths of
+  `_parse_object_block`, so the block is kept and parsing stops. The plan said this range was impossible; it is not.
+  Once packed blocks had a width, such a range let the parser read the next header from inside the block and hand
+  invented points to the handler. Fixed-width blocks (g1v2, g30v1) had the same fault before this work.
+- Added tests: g111v2 with qualifier 0x28 (index-prefixed octet-string events), and g10v1 in the round-trip
+  property.
