@@ -1,6 +1,6 @@
 # 009: Data link parser survives garbage and short LENGTH fields
 
-Status: todo
+Status: done
 Branch: fix/datalink-parser-hardening
 Depends on: none
 
@@ -54,6 +54,23 @@ rejected instead of yielding a frame whose `user_data_length` is negative. Upstr
   fine. Revisit only if profiling shows it.
 
 ## Done when
-- [ ] new tests pass
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- Step 2: with plain user data, 50 bad frames recurse only 50 deep, so the test passed on the old code. The user data
+  is `START_BYTES * 100`, so each bad frame also triggers about 100 header-CRC resyncs and the test fails before the
+  fix.
+- Step 3: the LENGTH check shares the header-CRC branch (`... or self._buffer[2] < LENGTH_FIELD_OVERHEAD`) instead
+  of a separate `if` after parsing the header.
+- Tests were trimmed after review. `test_4k_of_start_bytes_does_not_raise` was folded into
+  `test_garbage_then_valid_frame_is_recovered` (which now asserts `bytes_buffered == 0`). The header-only LENGTH case
+  was dropped for the header-plus-valid-frame case, which also shows nothing bogus is yielded.
+- Added `test_garbage_then_frame_split_across_feeds` for the review focus: a frame after garbage, split at every cut
+  point, including every partial header.
+- Step 5: `st.binary` alone almost never yields a CRC-valid header, so the property test passed on the old code.
+  It draws from random bytes, runs of start bytes, valid frames and CRC-valid headers with any LENGTH, then splits
+  the stream at random points. It now fails on the old parser.
+- Test helpers `_good_frame` and `_header_with_length` were added; the start bytes are spelled `START_BYTES`.
+- Follow-up: `DataLinkFrame.from_bytes` still accepts LENGTH below 5. See 016.
