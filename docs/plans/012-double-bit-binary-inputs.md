@@ -1,6 +1,6 @@
 # 012: Double-bit binary inputs (g3, g4)
 
-Status: todo
+Status: done
 Branch: feat/double-bit-inputs
 Depends on: 010 (adds the packed-width table this plan extends)
 
@@ -94,7 +94,25 @@ ends response parsing. Values reach a new opt-in handler callback, `on_double_bi
 - Outstation-side support for double-bit points.
 
 ## Done when
-- [ ] new tests pass
-- [ ] `tests/unit/master/test_handler.py::test_custom_implementation` passes unchanged
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `tests/unit/master/test_handler.py::test_custom_implementation` passes unchanged
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- `tests/unit/objects/test_base.py` gained a contract for each new class; its
+  `test_golden_covers_every_registered_class` requires one for every registered class. Those contracts hold the
+  step 1 size, g4v2 timestamp and g4v3 relative-time checks, so `test_double_bit.py` keeps only the registry lookups,
+  the golden octets and a state-bit property test.
+- g4v3 checks `relative_time_ms` in its own `__post_init__`, as g2v3 does. `FixedSizeObject._RANGE_FIELD` maps struct
+  codes one-to-one onto fields, and the flags octet holds two fields.
+- There is no `_parse_packed_double_bit`. `_iter_packed(layout, data, bits)` walks the bit fields of g1v1, g10v1 and
+  g3v1, and `_parse_double_bit_values` builds the g3v1 values inline.
+- `ObjectLayout.count` is now `int`. `_decode_object_layout` never set it to None.
+- `test_g4v1_event_with_count_qualifier` became `test_g4_event_then_g1v2_both_delivered`, parametrized over g4v1-v3,
+  each followed by a g1v2 block. Also added: g3v1 with a nonzero start index, g3v1 then g1v2 end to end, a malformed
+  g3v1 block, and the `dnp3.master` exports.
+- Added, from review: `_DoubleBitFlags._pack` masks quality to bits 0-5. `DoubleBitQuality` names STATE_BIT_0/1, so a
+  quality carrying them could override the state on the wire.
+- README and `docs/control-commands.md` list groups 3 and 4.
+- Follow-up: 022 fixes the same state-bit leak in the single-bit binary flags (g1, g2, g10, g11).
