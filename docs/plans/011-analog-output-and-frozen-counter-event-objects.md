@@ -1,6 +1,6 @@
 # 011: Analog output objects (g40-g43) and frozen counter events (g23)
 
-Status: todo
+Status: done
 Branch: feat/analog-output-objects
 Depends on: none (010 is independent; merge in either order)
 
@@ -99,7 +99,29 @@ but the parser stops before reaching it. `on_frozen_counter` also receives g23 f
 - Master-side encoding of g41 requests beyond what `commands.py` already does.
 
 ## Done when
-- [ ] new tests pass
-- [ ] `test_decoded_values_golden` passes unchanged
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `test_decoded_values_golden` passes unchanged
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- Step 5 skipped: the in-repo outstation `Database` has no analog output points, so it cannot emit g40.
+- The step 4 parser change (`test_unknown_group_absorbs_remainder` to group 200, `_lookup_object_size` docstring)
+  landed with step 1: registering g40 is what broke that test.
+- `tests/unit/objects/test_base.py` gained a contract for each new class; its
+  `test_golden_covers_every_registered_class` requires one for every registered class.
+- The handler in `test_response_parsing.py` is `CollectingHandler`, not `RecordingHandler`; it was extended.
+- `test_unregistered_group_block_still_parses` was deleted (the g40 dispatch tests supersede it);
+  `test_unregistered_trailing_block_is_not_dropped` uses group 200.
+- Step 3's g40, g42 and g41 tests passed on first run, because step 1 already let the parser size those blocks. Only
+  the g23 test failed first.
+- The step 1 size table was folded into the golden tests: each golden row is keyed by (group, variation), looked up
+  in the registry, and checks `get_size` against its byte length. Step 2's g23 tests are one parametrized
+  `test_frozen_counter_event_decode`.
+- g40 classes share `is_online` through a private `_AnalogOutputStatus` base; g41 and g43 share a
+  `_CommandStatusObject` base that masks the status on decode. g41 classes are `StaticObject`s, like `CROB`.
+- Added, from review: building a g41 or g43 object with `status` outside 0-127 raises `ValueError`; a master test
+  shows a g43 block does not stop parsing and is not reported; README and `docs/control-commands.md` list groups 23
+  and 43 and read g41 echo statuses with the new classes.
+- No follow-up plan. g11v3 and g40v5/v6 still have no registered width, so such a block takes the rest of the
+  fragment. Plan 001 chose that, and plan 013 makes such blocks visible.
