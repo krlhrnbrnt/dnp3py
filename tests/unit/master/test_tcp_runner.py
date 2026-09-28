@@ -231,6 +231,7 @@ def make_runner(
     *,
     link_reset: LinkResetPolicy = LinkResetPolicy.NEVER,
     response_timeout: float = 2.0,
+    poll_retry_delay: float = 5.0,
 ) -> tuple[MasterTcpRunner, RecordingHandler]:
     """Build a runner over a supplied channel, with a recording handler."""
     handler = RecordingHandler()
@@ -243,8 +244,25 @@ def make_runner(
         channel=channel,  # type: ignore[arg-type]
         link_reset=link_reset,
         response_timeout=response_timeout,
+        poll_retry_delay=poll_retry_delay,
     )
     return runner, handler
+
+
+def unsolicited_response(*, seq: int, index: int, value: float) -> bytes:
+    """Build an unsolicited response carrying one analog input, asking for CONFIRM."""
+    data = bytearray(analog_response(seq=seq, fir=True, fin=True, con=True, index=index, value=value))
+    data[0] |= 0x10  # UNS bit
+    data[1] = FunctionCode.UNSOLICITED_RESPONSE.value
+    return bytes(data)
+
+
+def idle_scheduler(runner: MasterTcpRunner) -> None:
+    """Leave one task on the scheduler that is not due for an hour."""
+    runner.master.scheduler.clear()
+    task = IntegrityPollTask(interval=3600.0)
+    task.mark_executed()
+    runner.master.scheduler.add_task(task)
 
 
 class TestLifecycle:
@@ -912,6 +930,201 @@ class TestScheduledPolls:
         await responder
 
         assert sent[0][0] & 0x0F == (first + 1) % 16
+
+
+class TestRunPolls:
+    """The `run_polls()` drive loop.
+
+    Scheduling itself is `PollScheduler`'s job and is tested in
+    `test_polling.py`; what matters here is that the runner drives it, listens
+    between polls, and retries a failed poll.
+    """
+
+    async def test_returns_when_nothing_scheduled(self) -> None:
+        """With an empty scheduler the loop returns instead of spinning."""
+        channel_a, _ = create_channel_pair()
+        await channel_a.open()
+        runner, _ = make_runner(channel_a)
+        await runner.open()
+        runner.master.scheduler.clear()
+
+        await asyncio.wait_for(runner.run_polls(), timeout=1.0)
+
+    async def test_stops_on_event(self) -> None:
+        """Setting the stop event ends the loop after the current poll."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, _ = make_runner(channel_a)
+        await runner.open()
+        peer = FakeOutstation(channel_b)
+        runner.master.scheduler.clear()
+        runner.master.scheduler.add_task(IntegrityPollTask())
+
+        stop = asyncio.Event()
+
+        async def respond() -> None:
+            seq = await peer.read_request_seq()
+            await peer.send_fragment(analog_response(seq=seq, fir=True, fin=True, con=False, index=0, value=1.0))
+            stop.set()
+
+        responder = asyncio.create_task(respond())
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        await responder
+
+        assert stop.is_set()
+
+    async def test_waits_for_a_future_task(self) -> None:
+        """A task not yet due makes the loop wait rather than busy-spin."""
+        channel_a, _ = create_channel_pair()
+        await channel_a.open()
+        runner, _ = make_runner(channel_a)
+        await runner.open()
+        idle_scheduler(runner)
+        stop = asyncio.Event()
+
+        async def stop_soon() -> None:
+            await asyncio.sleep(0.1)
+            stop.set()
+
+        stopper = asyncio.create_task(stop_soon())
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        await stopper
+
+    async def test_confirms_unsolicited_while_idle(self) -> None:
+        """An unsolicited response between polls is reported and confirmed promptly.
+
+        Left unread until the next poll, it would outlive the outstation's
+        confirm timer and be retried, and each retry reported again.
+        """
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, handler = make_runner(channel_a)
+        await runner.open()
+        idle_scheduler(runner)
+        peer = FakeOutstation(channel_b)
+        stop = asyncio.Event()
+
+        polling = asyncio.create_task(runner.run_polls(stop=stop))
+        await peer.send_fragment(unsolicited_response(seq=3, index=9, value=42.0))
+        confirms = await peer.read_fragments(1, timeout=1.0)
+        stop.set()
+        await asyncio.wait_for(polling, timeout=1.0)
+
+        assert confirms[0][1] == FunctionCode.CONFIRM.value
+        assert confirms[0][0] & 0x10  # UNS
+        assert handler.analog_inputs[9] == pytest.approx(42.0)
+
+    async def test_request_preempts_idle_listen(self) -> None:
+        """A request from another task does not wait for the next poll to be due."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, handler = make_runner(channel_a)
+        await runner.open()
+        idle_scheduler(runner)
+        peer = FakeOutstation(channel_b)
+        stop = asyncio.Event()
+
+        async def respond() -> None:
+            seq = await peer.read_request_seq()
+            await peer.send_fragment(analog_response(seq=seq, fir=True, fin=True, con=False, index=1, value=5.0))
+
+        polling = asyncio.create_task(runner.run_polls(stop=stop))
+        await asyncio.sleep(0.05)  # let the loop start listening
+        responder = asyncio.create_task(respond())
+        infos = await asyncio.wait_for(runner.integrity_poll(), timeout=1.0)
+        await responder
+
+        # Idle listening resumes once the request is done.
+        await peer.send_fragment(unsolicited_response(seq=3, index=9, value=42.0))
+        await peer.read_fragments(1, timeout=1.0)
+        stop.set()
+        await asyncio.wait_for(polling, timeout=1.0)
+
+        assert len(infos) == 1
+        assert handler.analog_inputs == {1: pytest.approx(5.0), 9: pytest.approx(42.0)}
+
+    async def test_failed_poll_is_retried(self) -> None:
+        """A poll that times out is retried after the retry delay, not abandoned."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, handler = make_runner(channel_a, response_timeout=0.2, poll_retry_delay=0.05)
+        await runner.open()
+        runner.master.scheduler.clear()
+        task = IntegrityPollTask()
+        runner.master.scheduler.add_task(task)
+        peer = FakeOutstation(channel_b)
+
+        async def respond_second_time() -> None:
+            await peer.read_request_seq()
+            seq = await peer.read_request_seq()
+            await peer.send_fragment(analog_response(seq=seq, fir=True, fin=True, con=False, index=2, value=8.0))
+
+        responder = asyncio.create_task(respond_second_time())
+        await asyncio.wait_for(runner.run_polls(), timeout=2.0)
+        await responder
+
+        assert task.is_due() is False
+        assert handler.analog_inputs[2] == pytest.approx(8.0)
+
+    async def test_link_failure_ends_the_loop(self) -> None:
+        """A failed link is not retried; it propagates to the caller."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, _ = make_runner(channel_a, poll_retry_delay=0.05)
+        await runner.open()
+        runner.master.scheduler.clear()
+        runner.master.scheduler.add_task(IntegrityPollTask())
+        peer = FakeOutstation(channel_b)
+
+        async def close_after_request() -> None:
+            await peer.read_fragments(1)
+            await channel_b.close()
+
+        closer = asyncio.create_task(close_after_request())
+        with pytest.raises(LinkError):
+            await asyncio.wait_for(runner.run_polls(), timeout=2.0)
+        await closer
+
+    async def test_stop_during_retry_delay(self) -> None:
+        """Setting stop while waiting to retry ends the loop without the retry."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, _ = make_runner(channel_a, response_timeout=0.1, poll_retry_delay=3600.0)
+        await runner.open()
+        runner.master.scheduler.clear()
+        runner.master.scheduler.add_task(IntegrityPollTask())
+        stop = asyncio.Event()
+
+        async def stop_after_failure() -> None:
+            await asyncio.sleep(0.3)
+            stop.set()
+
+        stopper = asyncio.create_task(stop_after_failure())
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        await stopper
+
+    async def test_send_preempts_idle_listen(self) -> None:
+        """`send()` from another task also ends an idle listen rather than waiting it out."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, _ = make_runner(channel_a, response_timeout=5.0)
+        await runner.open()
+        peer = FakeOutstation(channel_b)
+
+        listener = asyncio.create_task(runner.listen_unsolicited(timeout=5.0))
+        await asyncio.sleep(0.05)  # let the listen take the channel
+        await asyncio.wait_for(runner.send(runner.master.build_integrity_poll()), timeout=1.0)
+        sent = await peer.read_fragments(1)
+
+        assert await asyncio.wait_for(listener, timeout=1.0) is None
+        assert sent[0][1] == FunctionCode.READ.value
 
 
 class TestMalformedTraffic:

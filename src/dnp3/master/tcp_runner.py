@@ -12,10 +12,14 @@ multi-fragment application CONFIRM handshake.
     finally:
         await runner.close()
 
-Scheduling deliberately lives *above* this class. `PollScheduler` models when a
-poll is due and is transport-independent; driving it from inside a TCP runner
-would make a serial or UDP implementation reimplement the loop. `poll(task)`
-runs one scheduled task; the loop that decides when to call it is the caller's.
+`PollScheduler` models when a poll is due and is transport-independent.
+`poll(task)` runs one scheduled task. `run_polls()` drives the master's scheduler
+with it and listens for unsolicited responses between polls; a caller that needs
+different scheduling writes its own loop around `poll(task)` instead.
+
+One exchange uses the channel at a time. `request()` and `send()` wait for an
+exchange in progress, but pre-empt an idle `listen_unsolicited()`, so a command
+issued while `run_polls()` waits between polls goes out at once.
 
 This is not a mirror of `OutstationTcpRunner`. The two share a shape at the link
 and transport layers, but the seam between them is better extracted once there
@@ -25,8 +29,10 @@ are two real implementations to compare than guessed from one.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -122,6 +128,10 @@ class LinkError(MasterRunnerError):
     """
 
 
+class _InterruptedError(Exception):
+    """Raised inside the runner when a wait gives way to another exchange or a stop."""
+
+
 @dataclass
 class _Burst:
     """One solicited response burst, accumulated across fragments.
@@ -150,6 +160,8 @@ class MasterTcpRunner:
         link_reset: Whether to reset the data link on open.
         channel: Channel to use instead of opening a TCP client. Supplied by
             tests to exercise the stack without a socket.
+        poll_retry_delay: Seconds `run_polls()` waits before retrying a
+            scheduled poll that timed out or broke its sequence walk.
     """
 
     master: Master
@@ -158,12 +170,18 @@ class MasterTcpRunner:
     response_timeout: float = 10.0
     link_reset: LinkResetPolicy = LinkResetPolicy.ON_OPEN
     channel: Channel | None = None
+    poll_retry_delay: float = 5.0
 
     _parser: FrameParser = field(default_factory=FrameParser, init=False, repr=False)
     _segmenter: Segmenter = field(default_factory=Segmenter, init=False, repr=False)
     _reassembler: Reassembler | None = field(default=None, init=False, repr=False)
     _owns_channel: bool = field(default=False, init=False, repr=False)
     _pending: deque[DataLinkFrame] = field(default_factory=deque, init=False, repr=False)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    # Set while a request or send is queued for the lock; an idle listen gives
+    # way to it rather than holding the channel until its own deadline.
+    _contended: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+    _contenders: int = field(default=0, init=False, repr=False)
 
     @property
     def is_open(self) -> bool:
@@ -311,11 +329,16 @@ class MasterTcpRunner:
                 `MAX_BURST_FRAGMENTS`.
         """
         self._require_open()
+        async with self._claim():
+            return await self._exchange(request)
+
+    async def _exchange(self, request: RequestFragment) -> list[ResponseInfo]:
+        """Send a request and consume its response burst; the caller holds the channel."""
         # One deadline for the whole exchange, writes included, not one per
         # fragment: a per fragment deadline lets a peer that answers slowly but
         # steadily hold the request open indefinitely.
         deadline = self._deadline(None)
-        await self.send(request, deadline=deadline)
+        await self._send(request, deadline)
 
         burst = _Burst(expected_seq=request.header.control.seq)
         while True:
@@ -347,7 +370,7 @@ class MasterTcpRunner:
             LinkError: The write failed or did not complete in its budget.
         """
         budget_end = asyncio.get_running_loop().time() + CONFIRM_WRITE_BUDGET
-        await self.send(self.master.build_confirm(sequence, uns=uns), deadline=max(deadline, budget_end))
+        await self._send(self.master.build_confirm(sequence, uns=uns), max(deadline, budget_end))
 
     async def send(self, request: RequestFragment, *, deadline: float | None = None) -> None:
         """Segment an application fragment and frame each segment onto the link.
@@ -362,8 +385,11 @@ class MasterTcpRunner:
             MasterRunnerError: The channel is not open.
         """
         self._require_open()
-        if deadline is None:
-            deadline = self._deadline(None)
+        async with self._claim():
+            await self._send(request, self._deadline(None) if deadline is None else deadline)
+
+    async def _send(self, request: RequestFragment, deadline: float) -> None:
+        """Transmit a fragment; the caller holds the channel."""
         for segment in self._segmenter.segment(request.to_bytes()):
             await self._write_frame(
                 build_unconfirmed_user_data(
@@ -431,7 +457,8 @@ class MasterTcpRunner:
         Values reach the SOE handler as a side effect of parsing, the same as for
         a poll. Use this when the master is otherwise idle; unsolicited responses
         that arrive mid-request are handled inline by `request()`. A solicited
-        fragment arriving meanwhile is dropped unparsed and logged.
+        fragment arriving meanwhile is dropped unparsed and logged. A request
+        from another task ends the wait early.
 
         `None` means "nothing arrived in time" and nothing more. A link that
         has failed raises `LinkError` rather than returning `None`, so a caller
@@ -442,23 +469,44 @@ class MasterTcpRunner:
             timeout: Seconds to wait. None waits `response_timeout`.
 
         Returns:
-            Info for the unsolicited response, or None if none arrived in time.
+            Info for the unsolicited response, or None if none arrived in time
+            or a request pre-empted the wait.
 
         Raises:
             LinkError: The link failed or delivered unusable bytes.
             MasterRunnerError: The channel is not open.
         """
         self._require_open()
-        deadline = self._deadline(timeout)
-        while True:
-            try:
-                info = await self._receive_fragment(deadline)
-            except ResponseTimeoutError as exc:
-                logger.debug("No unsolicited response: %s", exc)
-                return None
-            if info is None or not info.is_unsolicited:
-                continue
-            return info
+        return await self._listen(self._deadline(timeout))
+
+    async def _listen(self, deadline: float, stop: asyncio.Event | None = None) -> ResponseInfo | None:
+        """Wait for one unsolicited response, giving way to a queued request.
+
+        Args:
+            deadline: Event-loop time after which to give up.
+            stop: Event that also ends the wait when set.
+
+        Returns:
+            Info for the unsolicited response, or None if the wait ended first.
+
+        Raises:
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The channel is not open.
+        """
+        interrupts = (self._contended,) if stop is None else (self._contended, stop)
+        # The lock itself, not `_claim()`: an idle listen must not pre-empt itself.
+        async with self._lock:
+            while True:
+                try:
+                    info = await self._receive_fragment(deadline, interrupts=interrupts)
+                except ResponseTimeoutError as exc:
+                    logger.debug("No unsolicited response: %s", exc)
+                    return None
+                except _InterruptedError:
+                    return None
+                if info is None or not info.is_unsolicited:
+                    continue
+                return info
 
     # -- scheduling -----------------------------------------------------------
 
@@ -481,6 +529,67 @@ class MasterTcpRunner:
         responses = await self.request(request)
         self.master.mark_poll_executed(task)
         return responses
+
+    async def run_polls(self, *, stop: asyncio.Event | None = None) -> None:
+        """Drive the master's `PollScheduler` until stopped.
+
+        Composes scheduling with transport rather than owning either: the
+        intervals come from `PollingConfig`, the due-time arithmetic from
+        `PollScheduler`, and only the sending happens here.
+
+        Between polls the loop listens for unsolicited responses, so they are
+        confirmed before the outstation's confirm timer expires. A poll that
+        times out or breaks its sequence walk is logged and retried after
+        `poll_retry_delay`; a failed link ends the loop.
+
+        Args:
+            stop: Event that ends the loop when set. Without one the loop runs
+                until cancelled, or until the scheduler has no task left.
+
+        Raises:
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The channel is not open.
+        """
+        self._require_open()
+        stop = stop if stop is not None else asyncio.Event()
+
+        while not stop.is_set():
+            task = self.master.scheduler.get_next_task()
+            if task is None:
+                wait = self.master.scheduler.get_time_until_next()
+                if wait is None:
+                    return
+                await self._idle(max(wait, 0.0), stop)
+                continue
+
+            try:
+                await self.poll(task)
+            except LinkError:
+                raise
+            except MasterRunnerError as exc:
+                logger.warning(
+                    "%s failed, retrying in %.1f s: %s",
+                    type(task).__name__,
+                    self.poll_retry_delay,
+                    exc,
+                )
+                await self._idle(self.poll_retry_delay, stop)
+
+    async def _idle(self, timeout: float, stop: asyncio.Event) -> None:
+        """Handle unsolicited responses until `timeout` elapses or `stop` is set.
+
+        Args:
+            timeout: Seconds to idle.
+            stop: Event that ends the wait early.
+
+        Raises:
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The channel is not open.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not stop.is_set() and loop.time() < deadline:
+            await self._listen(deadline, stop)
 
     # -- protocol stack -------------------------------------------------------
 
@@ -617,6 +726,7 @@ class MasterTcpRunner:
         deadline: float,
         *,
         burst: _Burst | None = None,
+        interrupts: tuple[asyncio.Event, ...] = (),
     ) -> ResponseInfo | None:
         """Read until one application fragment is parsed, or the deadline passes.
 
@@ -633,6 +743,7 @@ class MasterTcpRunner:
             burst: Solicited burst being accumulated, if any. Unsolicited
                 listening passes None, and then only unsolicited fragments are
                 parsed.
+            interrupts: Events that end the wait early when set.
 
         Returns:
             Info for the fragment, or None if it did not parse as a response
@@ -640,11 +751,12 @@ class MasterTcpRunner:
 
         Raises:
             ResponseTimeoutError: The deadline passed.
+            _InterruptedError: An interrupt was set before a fragment completed.
             LinkError: The link failed, the peer closed the connection, or it
                 delivered unusable bytes.
             MasterRunnerError: A fragment broke the burst's sequence walk.
         """
-        data = await self._read_fragment_bytes(deadline)
+        data = await self._read_fragment_bytes(deadline, interrupts)
         if burst is None:
             if not self._screen_unsolicited(data):
                 return None
@@ -664,7 +776,7 @@ class MasterTcpRunner:
 
         return info
 
-    async def _read_fragment_bytes(self, deadline: float) -> bytes:
+    async def _read_fragment_bytes(self, deadline: float, interrupts: tuple[asyncio.Event, ...] = ()) -> bytes:
         """Read link frames until one application fragment is reassembled.
 
         Frames addressed elsewhere and link-management frames carrying no user
@@ -672,12 +784,14 @@ class MasterTcpRunner:
 
         Args:
             deadline: Event-loop time after which to give up.
+            interrupts: Events that end the wait early when set.
 
         Returns:
             The reassembled application fragment.
 
         Raises:
             ResponseTimeoutError: The deadline passed.
+            _InterruptedError: An interrupt was set before a fragment completed.
             LinkError: The link failed, the peer closed the connection, or a
                 transport segment did not fit the stream being reassembled.
         """
@@ -699,13 +813,15 @@ class MasterTcpRunner:
                 if fragment is not None:
                     return fragment
 
+            if any(event.is_set() for event in interrupts):
+                raise _InterruptedError
             remaining = deadline - loop.time()
             if remaining <= 0:
                 msg = "Timed out waiting for a response fragment"
                 raise ResponseTimeoutError(msg)
 
             try:
-                data = await asyncio.wait_for(channel.read(READ_CHUNK_SIZE), timeout=remaining)
+                data = await _read_chunk(channel, remaining, interrupts)
             except TimeoutError as exc:
                 msg = "Timed out reading from the outstation"
                 raise ResponseTimeoutError(msg) from exc
@@ -862,6 +978,22 @@ class MasterTcpRunner:
         """
         return asyncio.get_running_loop().time() + (self.response_timeout if timeout is None else timeout)
 
+    @contextlib.asynccontextmanager
+    async def _claim(self) -> AsyncIterator[None]:
+        """Hold the channel for one exchange, pre-empting an idle listen."""
+        self._contenders += 1
+        self._contended.set()
+        try:
+            await self._lock.acquire()
+        finally:
+            self._contenders -= 1
+            if not self._contenders:
+                self._contended.clear()
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     def _require_open(self) -> tuple[Channel, Reassembler]:
         """Return the channel and reassembler, or fail if `open()` has not run.
 
@@ -886,3 +1018,34 @@ class MasterTcpRunner:
             msg = "Channel is closed; open() must be awaited before using the runner"
             raise MasterRunnerError(msg)
         return self.channel, self._reassembler
+
+
+async def _read_chunk(channel: Channel, timeout: float, interrupts: tuple[asyncio.Event, ...]) -> bytes:
+    """Read from the channel until data arrives, the timeout passes, or an interrupt is set.
+
+    Only the channel read is ever cancelled, never the processing of what it
+    returned, and it is awaited to completion before returning so the next
+    reader cannot overlap it.
+
+    Returns:
+        Bytes read, empty at end of stream.
+
+    Raises:
+        TimeoutError: The timeout passed.
+        _InterruptedError: An interrupt was set first.
+        ChannelError: The read failed.
+    """
+    reader = asyncio.ensure_future(channel.read(READ_CHUNK_SIZE))
+    watchers = [asyncio.ensure_future(event.wait()) for event in interrupts]
+    try:
+        await asyncio.wait([reader, *watchers], timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in (reader, *watchers):
+            task.cancel()
+        await asyncio.wait([reader, *watchers])
+
+    if not reader.cancelled():
+        return reader.result()
+    if any(event.is_set() for event in interrupts):
+        raise _InterruptedError
+    raise TimeoutError
