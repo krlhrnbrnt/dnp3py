@@ -2,7 +2,7 @@
 
 Status: todo
 Branch: feat/runner-null-response-requests
-Depends on: 014 (adds `startup()`, which this plan makes use the new methods)
+Depends on: 014 (adds `startup()`, which this plan makes use the new methods), 026 (adds `RequestRejectedError`)
 
 ## Goal
 Three runner methods: `clear_restart()`, `enable_unsolicited()` and `disable_unsolicited()`. Each sends its request
@@ -19,6 +19,9 @@ them, so a rejected startup step raises instead of only being logged.
     with `_warn_if_rejected()` (`:793`);
   - `time_sync()` raises `TimeSyncError(MasterRunnerError)` through `_raise_if_rejected()` (`:785`);
   - `_REJECTED` (`:74`) holds the three request-error bits.
+- From plan 026, in `tcp_runner.py`: `RequestRejectedError(MasterRunnerError)` with `iin: IIN`, exported from
+  `dnp3.master`, and a private `_request_accepted(request, what)`, which runs `request()` and raises
+  `RequestRejectedError` on a `_REJECTED` bit in the last fragment. `write_octet_string()` uses it.
 - `src/dnp3/master/master.py` has `build_enable_unsolicited()` and `build_disable_unsolicited()`, but no clear-restart
   builder. `src/dnp3/application/builder.py` has the request builders.
 - Clear restart is a WRITE of g80v1 with qualifier 0x00, start 7, stop 7 and one data octet 0x00: IIN bit 7 is
@@ -47,10 +50,9 @@ them, so a rejected startup step raises instead of only being logged.
      and g60v4 headers only;
    - `test_other_iin_bits_accepted`: DEVICE_TROUBLE | CLASS_1_EVENTS does not raise.
    Implement:
-   - `RequestRejectedError(MasterRunnerError)` with `iin: IIN`;
-   - a private `_request_accepted(request, *, must_clear: IIN = IIN(0))`, which runs `request()` and raises on a
-     `_REJECTED` bit, or on any `must_clear` bit still set, in the last fragment;
-   - the three public methods on it. Export `RequestRejectedError` from `dnp3.master`.
+   - a keyword `must_clear: IIN = IIN(0)` on `_request_accepted`, which then also raises `RequestRejectedError` when
+     any `must_clear` bit is still set in the last fragment;
+   - the three public methods on it, each passing a `what` that names its request.
 3. Test: `TestStartup::test_rejected_unsolicited_control_raises` replaces `test_rejected_unsolicited_control_is_logged`,
    keeping its parametrization over DISABLE_UNSOLICITED and ENABLE_UNSOLICITED: the fake answers with
    NO_FUNC_CODE_SUPPORT, and `startup()` raises `RequestRejectedError`.
