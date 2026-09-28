@@ -125,3 +125,9 @@ but the parser stops before reaching it. `on_frozen_counter` also receives g23 f
   and 43 and read g41 echo statuses with the new classes.
 - No follow-up plan. g11v3 and g40v5/v6 still have no registered width, so such a block takes the rest of the
   fragment. Plan 001 chose that, and plan 013 makes such blocks visible.
+
+## Upstream sync (2026-09-28)
+Replaced by upstream. #74 added wire-layout rows for g40-g43 and g23; the master delivers g40/g42 on
+`on_analog_output` and g23 on `on_frozen_counter`, and frames g41/g43 without delivering them. The object classes this
+plan added (`src/dnp3/objects/analog_output.py` and the g23 classes in `counter.py`) were dropped, because nothing
+reads them any more. Plan 019 encoded through the g41 classes and is marked for revision.

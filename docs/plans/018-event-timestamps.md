@@ -4,6 +4,16 @@ Status: todo
 Branch: fix/event-timestamps
 Depends on: 017 (adds `HeaderInfo`, which gains the timestamp quality), 012 (g4v2 / g4v3 get the same treatment)
 
+## Upstream sync (2026-09-28)
+Mostly done upstream (#81). Every timed layout row sets `timestamp` (a UTC `datetime`); relative-time
+objects (g2v3, g4v3) are timed from the last g51 CTO before them in the same fragment; a CTO does not carry across
+fragments; g51 blocks are not delivered; and `ResponseInfo.relative_time_without_cto` counts relative-time objects
+left untimed. Steps 1 and 3 are done (tests in `tests/unit/master/test_event_time.py`).
+
+Remaining: timestamp quality (step 2, which needs plan 017's `HeaderInfo`; upstream #117 tracks the
+unsynchronized-CTO case), the end-to-end counter event test (step 4) and the README example (step 5). Cut the plan
+down to those before implementing.
+
 ## Goal
 Every value decoded from an object that carries a time has `timestamp` set, as a UTC `datetime`. Relative-time
 events (g2v3, g4v3) are resolved against the g51 common time of occurrence (CTO) that precedes them in the fragment.

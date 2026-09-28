@@ -56,3 +56,8 @@ Depends on: none (merge after 003 to type against the final channel classes)
 - [x] `uv run pytest tests/` passes, coverage >= 95%
 - [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean, with the
       tcp_runner override and ignores removed
+
+## Upstream sync (2026-09-28)
+Kept, and merged with upstream's cancellation fixes (#68: `_outer_cancellation_pending()` guards at the
+handoff and in the teardown) and per-connection peer ids (#72: `PeerId(source, connection)` passed to
+`process_request`).

@@ -4,6 +4,11 @@ Status: todo
 Branch: refactor/master-retry-timeout-config
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Still todo; upstream #75 is still open. Line numbers in Context predate the sync. The runner's
+`response_timeout` is still 10.0, `_deadline()` is unchanged, and `run_polls()` still retries after
+`poll_retry_delay`.
+
 ## Goal
 Every master configuration field either does what it says or is gone.
 - `PollingConfig.retry_count` and `MasterConfig.task_retry_count` are removed. So is the retry path in the task

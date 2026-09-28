@@ -94,3 +94,9 @@ but not these.
   invented points to the handler. Fixed-width blocks (g1v2, g30v1) had the same fault before this work.
 - Added tests: g111v2 with qualifier 0x28 (index-prefixed octet-string events), and g10v1 in the round-trip
   property.
+
+## Upstream sync (2026-09-28)
+Replaced by upstream. #74 frames response blocks from the wire-layout table, which sizes the packed
+variations (g1v1, g3v1, g10v1) by count and stops with `TruncationReason.PACKED_WITH_INDEX_PREFIX` on a packed block
+with an index prefix. Octet strings are sized by g110/g111 rows in that table (the variation is the length, 1-255; no
+row for variation 0), added when plan 025 was ported.

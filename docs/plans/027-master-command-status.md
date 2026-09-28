@@ -4,6 +4,18 @@ Status: todo
 Branch: feat/master-command-status
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Needs revision before implementing:
+- No g41 object classes are registered any more, so `registry.lookup(41, v)` returns None. Take widths from
+  `dnp3.objects.layout.object_width` (g12v1 11, g41v1-v4 5, 3, 5, 9).
+- The runner's receive path is upstream's. `_next_solicited(burst, deadline)` reads through `_receive_fragment`, which
+  screens a fragment's header (`_screen_solicited` / `_screen_unsolicited`) before `master.process_response` and
+  confirms unsolicited responses itself; `_handle_unsolicited` is gone. The exchange has one deadline, set in
+  `_exchange()`, and CONFIRM writes get `CONFIRM_WRITE_BUDGET`. `_exchange()` and `_claim()` exist as described.
+- `process_response` logs a `ParseError`, and `_receive_fragment` logs the discard again: step 5's
+  `test_parse_failure_is_logged_once` still applies.
+- Link failures raise `LinkError`. Line numbers in Context predate the sync.
+
 ## Goal
 `await runner.direct_operate(task)` and `await runner.select_and_operate(task)` return a `CommandTaskResult` with one
 `CommandPointResult(header_index, index, state, status)` per commanded point, so a caller can see that point 3 came back

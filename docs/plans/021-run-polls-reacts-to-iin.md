@@ -5,6 +5,11 @@ Branch: feat/run-polls-iin-reactions
 Depends on: 014 (`time_sync()`, `time_sync_method`), 020 (`clear_restart()`, `enable_unsolicited()`,
 `RequestRejectedError`)
 
+## Upstream sync (2026-09-28)
+Still todo. The fork kept `run_polls()`, which upstream removed. Read `ConnectionLostError` as
+`LinkError`: a `LinkError` ends the loop, and any other `MasterRunnerError` is retried after `poll_retry_delay`. It
+depends on plan 020, which now has an open API decision. Line numbers in Context predate the sync.
+
 ## Goal
 While `run_polls()` drives the master, it reacts to IIN bits as opendnp3 does:
 - DEVICE_RESTART: clear the bit, then run an integrity poll, then re-enable unsolicited reporting;

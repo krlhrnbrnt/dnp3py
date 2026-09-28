@@ -4,6 +4,13 @@ Status: todo
 Branch: fix/analog-output-command-variations
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Needs revision before implementing. The g41 classes this plan encodes through
+(`src/dnp3/objects/analog_output.py`) were dropped in the sync, because upstream decodes g40-g43 from the wire-layout
+table. Encode each variation with its own struct format (INT32, INT16, FLT32 or FLT64, then the status octet; A.20),
+or re-add command classes for g41 only. `dnp3.objects.layout.object_width(41, v)` gives the widths 5, 3, 5 and 9. Line
+numbers in Context predate the sync.
+
 ## Goal
 `CommandBuilder.add_analog(index, value, variation=...)` sends the setpoint as g41v1 (32-bit integer, the default,
 as today), g41v2 (16-bit integer), g41v3 (32-bit float) or g41v4 (64-bit float). A value the chosen variation cannot

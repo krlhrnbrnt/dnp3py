@@ -119,3 +119,13 @@ This lets a test engineer tell "the outstation didn't send it" from "the master 
 - No follow-up plan. Found in review, older than this work and not planned: qualifier bit 7 is ignored, so 0x80
   parses as 0x00; `parse_response` accepts non-response function codes; `RangeCode` names 3-5 RESERVED and puts
   VIRTUAL_ADDRESS on 0xB, which the spec defines as variable format.
+
+## Upstream sync (2026-09-28)
+Mostly replaced by upstream #71 and #103. `ResponseFragment.truncation` and `ResponseInfo.truncation`
+(`Truncation`, `TruncationReason`) say where framing stopped and why, and the master logs a warning. One behavior
+differs from this plan: a block shorter than its declared count now delivers nothing, where this plan delivered its
+whole objects. `UnparsedData`, `UnparsedReason` and the removal of `parse_response_object_blocks` are gone with it.
+
+The #66 part was kept: `Master.process_response` returns None only for a `ParseError`, which it logs, and any other
+exception propagates (`TestProcessResponse` in `tests/unit/master/test_master.py`). #66 and #67 are still open
+upstream.

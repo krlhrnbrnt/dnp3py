@@ -4,6 +4,19 @@ Status: todo
 Branch: feat/soe-header-info
 Depends on: 012 (its double-bit dispatch is restructured here), 025 (likewise its octet string dispatch)
 
+## Upstream sync (2026-09-28)
+Needs revision before implementing. Upstream rewrote the master's delivery:
+- Values are decoded from the wire-layout table (`WireLayout` in `src/dnp3/objects/layout.py`), not from registry
+  classes. `_decode_block`, `_ALIASES` and the `_parse_*_values` helpers are gone; each point kind has a decode
+  function in `_DELIVERIES` (`src/dnp3/master/master.py`). `WireLayout.has_flags` (false on packed rows) gives
+  `flags_valid`. The layout does not say static or event: use the `EventObject` base of `registry.lookup(...)` where
+  a class exists, or add an event flag to the layout rows.
+- Delivery is already in wire order (IEEE 1815-2012 5.1.5.1.3), with one callback per run of consecutive same-kind
+  blocks rather than one per block. Step 3 would change that documented behavior; decide whether per-value
+  `HeaderInfo` is enough without it.
+- `DoubleBitValue` is in `dnp3.master.double_bit` and `OctetStringValue` in `dnp3.master.octet_string`.
+- Line numbers in Context predate the sync.
+
 ## Goal
 A handler can tell an event from a current value, and receives values in the order the outstation sent them. Every
 value carries `header: HeaderInfo` (group, variation, qualifier, position, event or static, flags sent or assumed).

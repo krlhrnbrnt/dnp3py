@@ -104,3 +104,16 @@ the master steps over g110/g111 blocks and drops their contents.
   2^32 empty strings. `test_bytearray_data_yields_bytes` pins the `bytes(...)` copy, since `ObjectBlock` is public and
   its data can be a `bytearray`. `test_static_and_event_for_same_index_both_delivered_in_wire_order` pins the second
   review focus point.
+
+## Upstream sync (2026-09-28)
+Ported onto upstream's layout-driven master. It differs from this plan:
+- g110/g111 are rows in the wire-layout table (`PointKind.OCTET_STRING`, `ValueCodec.OCTETS`, width = variation), so
+  the parser needs no special case and octet strings are delivered through `_DELIVERIES`, in wire order.
+- `OctetStringValue`, `OctetStringHandler` and `deliver_octet_string` live in `dnp3.master.octet_string`, as upstream's
+  double-bit types live in `dnp3.master.double_bit`. `OctetStringValue.timestamp` is a property that is always None,
+  so the value fits the shared delivery code; its fields are still only `index` and `value`.
+- Upstream's rule that a block shorter than its declared count delivers nothing applies here too.
+  `test_truncated_block_delivers_whole_strings` and `test_hostile_count_reads_nothing_past_block` became cases of
+  `test_unframed_block_delivers_nothing`, which also covers the size-prefix and variation-0 blocks.
+- The tests are in `tests/unit/master/test_octet_string.py`, `TestOctetStringFraming` in
+  `tests/unit/application/test_parser.py` and `TestOctetStringRows` in `tests/unit/objects/test_layout.py`.

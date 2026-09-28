@@ -4,6 +4,13 @@ Status: todo
 Branch: feat/runner-null-response-requests
 Depends on: 014 (adds `startup()`, which this plan makes use the new methods), 026 (adds `RequestRejectedError`)
 
+## Upstream sync (2026-09-28)
+Needs a decision before implementing. Upstream's runner already has `enable_unsolicited()`,
+`disable_unsolicited()` and `class_poll()`, each returning `list[ResponseInfo]` without judging IIN, and `startup()`
+uses the first two and only logs a rejection. Making them raise `RequestRejectedError` changes upstream's API; the
+alternative is to add only `clear_restart()` and have `startup()` raise through a `_REJECTED` check. Link failures
+raise `LinkError`, not `ConnectionLostError`. Line numbers in Context predate the sync.
+
 ## Goal
 Three runner methods: `clear_restart()`, `enable_unsolicited()` and `disable_unsolicited()`. Each sends its request
 and raises `RequestRejectedError` when the answer carries a request-error IIN bit (function not supported, object

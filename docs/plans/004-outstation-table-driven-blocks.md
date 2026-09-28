@@ -4,6 +4,13 @@ Status: todo
 Branch: refactor/outstation-table-driven-blocks
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Still todo. Line numbers in Context predate the sync; find symbols by name. Upstream changed the
+outstation since this was written: responses can set CON (#77), event buffer entries have serials (#77), and
+`process_request` takes a `peer` (#72). The five static builders, three event builders and `_read_*` wrappers are
+still there. `dnp3.objects.layout.object_width(group, variation)` now gives each object's width and could replace the
+per-type widths in `_read_class_events`.
+
 ## Goal
 The outstation builds READ responses from one static-block path and one event-block path driven by a table, instead
 of 13 near-identical private methods. Wire output and public API are unchanged.

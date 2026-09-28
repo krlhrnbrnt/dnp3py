@@ -4,6 +4,10 @@ Status: todo
 Branch: feat/outstation-time-sync
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Still todo. `Outstation.process_request` now also takes a `peer` (#72), and `_runner_over_tcp` in the
+end-to-end test exists as described. Line numbers in Context predate the sync.
+
 ## Goal
 The in-repo outstation keeps its own clock, and the master can set it with either procedure. A WRITE of g50v1 sets
 it directly. RECORD_CURRENT_TIME followed by a WRITE of g50v3 sets it to the written time plus the time elapsed since

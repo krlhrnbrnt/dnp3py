@@ -4,6 +4,10 @@ Status: todo
 Branch: feat/master-octet-string-write
 Depends on: 025 (the README section this extends)
 
+## Upstream sync (2026-09-28)
+Still todo. Read `ConnectionLostError` as `LinkError`. The README octet string section and its table row
+exist as this plan expects. Line numbers in Context predate the sync.
+
 ## Goal
 `Master.build_write_octet_string(index, value)` builds a WRITE of one g110 string, and
 `await MasterTcpRunner.write_octet_string(index, value)` sends it and raises `RequestRejectedError` when the outstation

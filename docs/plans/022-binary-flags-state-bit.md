@@ -4,6 +4,12 @@ Status: todo
 Branch: fix/binary-flags-state-bit
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Still todo. `src/dnp3/objects/double_bit.py` no longer exists (upstream decodes double-bit inputs in
+`dnp3.master.double_bit`); the fix is still one line in `_BinaryFlags._pack` (`src/dnp3/objects/binary_input.py:36`).
+The outstation encodes g1v2 and g10v2 in `_build_binary_input_blocks` / `_build_binary_output_blocks`
+(`outstation.py:757`, `:772`) and g2v1 in `_build_binary_event_blocks` (`:886`).
+
 ## Goal
 A binary point's reported state always comes from its `state` / `value`, never from its quality. Today an outstation
 point updated with `value=False, quality=BinaryQuality.ONLINE | BinaryQuality.STATE` is sent to the master as ON.

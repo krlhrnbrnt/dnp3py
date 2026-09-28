@@ -4,6 +4,10 @@ Status: todo
 Branch: fix/integrity-poll-resets-schedule
 Depends on: none
 
+## Upstream sync (2026-09-28)
+Still todo. The fork kept `run_polls()`, and `integrity_poll()` still goes through `request()`. Line
+numbers in Context predate the sync.
+
 ## Goal
 After `startup()`, or any `runner.integrity_poll()`, `run_polls()` waits a full `integrity_poll_interval` before its
 next scheduled integrity poll, instead of repeating it at once. A scheduled task that has never run is due at once,

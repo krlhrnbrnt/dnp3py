@@ -140,3 +140,9 @@ of them has a consumer.
   against it) and 024 (an integrity poll resets the scheduled one, and a task never run is due at once). Not
   planned: the non-LAN round trip is timed on the wall clock, so a clock step during the exchange skews the delay.
   Timing it on `time.monotonic()` would need a second injectable clock.
+
+## Upstream sync (2026-09-28)
+Ported onto upstream's runner. It differs from this plan in three ways: link and channel failures raise
+upstream's `LinkError` (`ConnectionLostError` does not exist), `startup()` uses the runner's `disable_unsolicited()`
+and `enable_unsolicited()`, and g50v3 also has a wire-layout row. `ResponseInfo.time_delay_ms` is read through the
+layout table. #73 is still open upstream.

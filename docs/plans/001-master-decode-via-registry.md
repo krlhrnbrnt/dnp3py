@@ -78,3 +78,9 @@ unchanged.
 - [x] new tests pass (golden, g21v5/v6, g40v3/v4)
 - [x] `uv run pytest tests/` passes, coverage >= 95% (97.01%; see Windows note above)
 - [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Upstream sync (2026-09-28)
+Replaced by upstream. craigpnnl/dnp3py #74 decodes every master value from the wire-layout table
+(`src/dnp3/objects/layout.py`, `_DELIVERIES` in `src/dnp3/master/master.py`), so the registry-based `_decode_block`
+this plan added was dropped when the fork was rebuilt on upstream. The goal still holds: the master decodes each
+object from one description of its layout.

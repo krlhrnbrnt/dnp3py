@@ -93,3 +93,7 @@ bytes, exception types and messages stay the same, so this is not a breaking cha
 - [x] new tests pass
 - [x] `uv run pytest tests/` passes with no edits to existing tests, coverage >= 95%
 - [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Upstream sync (2026-09-28)
+Kept. Upstream #70 made `ControlCode` the whole g12v1 octet and refuses an undefined Op Type, so
+`test_decoded_object_round_trips[CROB]` now draws only control octets with Op Type 0-4.

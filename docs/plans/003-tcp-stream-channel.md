@@ -66,3 +66,9 @@ both. Their constructors, fields, dataclass behavior and exceptions are unchange
 - [x] new tests pass
 - [x] `uv run pytest tests/` passes, coverage >= 95%
 - [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Upstream sync (2026-09-28)
+Kept, and merged with upstream's bounded close (#57, #84, #85). `StreamIO.close()` waits at most
+`config.close_timeout`, aborts the transport on a timeout or a cancellation, and always ends CLOSED.
+`TcpClientChannel.close()` also drops its streams, as upstream's tests expect. `TcpServer.stop()` closes connections
+concurrently and refuses a connection that arrives while it is closing.

@@ -116,3 +116,10 @@ ends response parsing. Values reach a new opt-in handler callback, `on_double_bi
   quality carrying them could override the state on the wire.
 - README and `docs/control-commands.md` list groups 3 and 4.
 - Follow-up: 022 fixes the same state-bit leak in the single-bit binary flags (g1, g2, g10, g11).
+
+## Upstream sync (2026-09-28)
+Replaced by upstream #76. It differs from this plan's API:
+- `DoubleBitValue` lives in `dnp3.master.double_bit`, and its state field is `state`, not `value`;
+- the opt-in protocol is `DoubleBitInputHandler.on_double_bit_input`;
+- `DefaultSOEHandler.double_bit_inputs` and `get_double_bit_input` exist, and g4v2/g4v3 values carry `timestamp`.
+The object classes in `src/dnp3/objects/double_bit.py` were dropped. Plan 022 is unaffected.
