@@ -71,6 +71,7 @@ from dnp3.objects.registry import (
 )
 from dnp3.objects.time import (
     TimeAndDate,
+    TimeAndDateRecorded,
     TimeCTO,
     TimeCTOUnsync,
     TimeDelayCoarse,
@@ -124,6 +125,7 @@ __all__ = [
     "PointValue",
     "StaticObject",
     "TimeAndDate",
+    "TimeAndDateRecorded",
     "TimeCTO",
     "TimeCTOUnsync",
     "TimeDelayCoarse",

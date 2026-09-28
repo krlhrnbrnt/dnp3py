@@ -18,12 +18,15 @@ qualifiers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 
 from dnp3.core.flags import AnalogQuality, BinaryQuality
 from dnp3.database import AnalogInputConfig, BinaryInputConfig, Database, EventClass
-from dnp3.master import Master, MasterConfig, MasterTcpRunner
+from dnp3.master import Master, MasterConfig, MasterTcpRunner, TimeSyncError, TimeSyncMethod
 from dnp3.master.handler import ResponseInfo
 from dnp3.outstation import Outstation, OutstationConfig, OutstationTcpRunner
 
@@ -79,20 +82,23 @@ async def _await_bind(runner: OutstationTcpRunner) -> tuple[str, int]:
     pytest.fail("outstation runner did not bind in time")
 
 
-async def _poll_over_tcp(
+@contextlib.asynccontextmanager
+async def _runner_over_tcp(
     database: Database,
     *,
     max_fragment_size: int | None = None,
-) -> tuple[RecordingHandler, list[ResponseInfo]]:
-    """Run one integrity poll through `MasterTcpRunner` over a real socket.
+    **master_options: Any,
+) -> AsyncIterator[tuple[MasterTcpRunner, RecordingHandler]]:
+    """An open `MasterTcpRunner` connected over a real socket to an `Outstation`.
 
     Args:
         database: Outstation database to serve.
         max_fragment_size: Outstation fragment cap, to force a multi-fragment
             response when small.
+        master_options: Passed on to `MasterConfig`.
 
-    Returns:
-        The recording handler and the burst's per-fragment info.
+    Yields:
+        The runner and its recording handler.
     """
     extra = {} if max_fragment_size is None else {"max_fragment_size": max_fragment_size}
     outstation_config = OutstationConfig(
@@ -106,7 +112,7 @@ async def _poll_over_tcp(
 
     handler = RecordingHandler()
     master = Master(
-        config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR),
+        config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR, **master_options),
         handler=handler,
     )
 
@@ -114,7 +120,7 @@ async def _poll_over_tcp(
         host, port = await _await_bind(os_runner)
         runner = MasterTcpRunner(master=master, host=host, port=port, response_timeout=POLL_TIMEOUT)
         async with runner:
-            infos = await asyncio.wait_for(runner.integrity_poll(), timeout=POLL_TIMEOUT)
+            yield runner, handler
     finally:
         await os_runner.stop()
         # Cancel before awaiting: the accept loop parks in `accept()` and would
@@ -123,6 +129,19 @@ async def _poll_over_tcp(
         with pytest.raises((asyncio.CancelledError, TimeoutError)):
             await asyncio.wait_for(serve_task, timeout=POLL_TIMEOUT)
 
+
+async def _poll_over_tcp(
+    database: Database,
+    *,
+    max_fragment_size: int | None = None,
+) -> tuple[RecordingHandler, list[ResponseInfo]]:
+    """Run one integrity poll through `MasterTcpRunner` over a real socket.
+
+    Returns:
+        The recording handler and the burst's per-fragment info.
+    """
+    async with _runner_over_tcp(database, max_fragment_size=max_fragment_size) as (runner, handler):
+        infos = await asyncio.wait_for(runner.integrity_poll(), timeout=POLL_TIMEOUT)
     return handler, infos
 
 
@@ -203,3 +222,41 @@ class TestMultiFragmentOverTcp:
         sequences = [i.sequence for i in infos]
         expected = [(sequences[0] + offset) % 16 for offset in range(len(sequences))]
         assert sequences == expected
+
+
+class TestTimeSyncOverTcp:
+    """Time synchronization against the in-repo outstation."""
+
+    async def test_time_sync_non_lan_against_outstation(self) -> None:
+        """DELAY_MEASURE then a g50v1 WRITE completes."""
+        async with _runner_over_tcp(Database()) as (runner, _):
+            await asyncio.wait_for(runner.time_sync(TimeSyncMethod.NON_LAN), timeout=POLL_TIMEOUT)
+
+    async def test_time_sync_lan_against_outstation_raises(self) -> None:
+        """The outstation does not implement RECORD_CURRENT_TIME, so the LAN procedure fails."""
+        async with _runner_over_tcp(Database()) as (runner, _):
+            with pytest.raises(TimeSyncError, match="RECORD_CURRENT_TIME"):
+                await asyncio.wait_for(runner.time_sync(TimeSyncMethod.LAN), timeout=POLL_TIMEOUT)
+
+
+class TestStartupOverTcp:
+    """The full startup sequence against the in-repo outstation."""
+
+    async def test_startup_against_outstation(self) -> None:
+        """Startup completes and the integrity poll reports values."""
+        database = Database()
+        database.add_binary_input(0, BinaryInputConfig(event_class=EventClass.NONE))
+        database.add_analog_input(0, AnalogInputConfig(event_class=EventClass.NONE))
+        database.update_binary_input(0, value=True, quality=BinaryQuality.ONLINE)
+        database.update_analog_input(0, value=725, quality=AnalogQuality.ONLINE)
+
+        async with _runner_over_tcp(
+            database,
+            disable_unsolicited_on_startup=True,
+            time_sync_on_startup=True,
+            time_sync_method=TimeSyncMethod.NON_LAN,
+        ) as (runner, handler):
+            await asyncio.wait_for(runner.startup(), timeout=POLL_TIMEOUT)
+
+        assert handler.binary_inputs == {0: True}
+        assert handler.analog_inputs == {0: 725.0}

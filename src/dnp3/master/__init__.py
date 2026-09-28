@@ -12,7 +12,7 @@ from dnp3.master.commands import (
     OperateTask,
     SelectTask,
 )
-from dnp3.master.config import MasterConfig, PollingConfig
+from dnp3.master.config import MasterConfig, PollingConfig, TimeSyncMethod
 from dnp3.master.double_bit import DoubleBitInputHandler, DoubleBitValue
 from dnp3.master.handler import (
     DefaultSOEHandler,
@@ -34,6 +34,7 @@ from dnp3.master.tcp_runner import (
     MasterRunnerError,
     MasterTcpRunner,
     ResponseTimeoutError,
+    TimeSyncError,
 )
 
 __all__ = [
@@ -63,4 +64,6 @@ __all__ = [
     "ResponseTimeoutError",
     "SOEHandler",
     "SelectTask",
+    "TimeSyncError",
+    "TimeSyncMethod",
 ]

@@ -16,11 +16,15 @@ from dnp3.application.builder import (
     build_delay_measure_request,
     build_disable_unsolicited_request,
     build_enable_unsolicited_request,
+    build_record_current_time_request,
+    build_write_request,
 )
 from dnp3.application.fragment import ObjectBlock, RequestFragment, ResponseFragment
 from dnp3.application.header import RequestHeader
 from dnp3.application.parser import ParseError, parse_response
+from dnp3.application.qualifiers import CountRange, ObjectHeader, PrefixCode, RangeCode
 from dnp3.core.enums import FunctionCode
+from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.master.commands import (
     CommandBuilder,
     DirectOperateTask,
@@ -52,6 +56,7 @@ from dnp3.master.polling import (
 )
 from dnp3.master.state import MasterState, MasterStateManager
 from dnp3.objects.layout import PointKind, TimeKind, ValueCodec, WireLayout, layout_for
+from dnp3.objects.time import TimeAndDate, TimeAndDateRecorded, TimeDelayCoarse, TimeDelayFine
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +517,49 @@ _DELIVERIES: Mapping[PointKind, _Delivery] = MappingProxyType(
 )
 
 
+# Milliseconds per unit of each g52 variation (A.25): coarse counts seconds, fine milliseconds.
+_TIME_DELAY_UNIT_MS = {
+    TimeDelayCoarse.VARIATION: 1000,
+    TimeDelayFine.VARIATION: 1,
+}
+
+
+def _time_delay_ms(objects: Sequence[ObjectBlock]) -> int | None:
+    """Turnaround time from the first g52 object in a response, in milliseconds."""
+    for block in objects:
+        header = block.header
+        unit_ms = _TIME_DELAY_UNIT_MS.get(header.variation)
+        wire = layout_for(header.group, header.variation)
+        if header.group != TimeDelayFine.GROUP or unit_ms is None or wire is None:
+            continue
+        slots = _block_slots(block)
+        if slots is None:
+            continue
+        for _, payload in _iter_object_slots(slots, block.data, wire.width):
+            return int.from_bytes(block.data[payload : payload + wire.width], "little") * unit_ms
+    return None
+
+
+def propagation_delay_ms(*, sent_ms: int, received_ms: int, outstation_delay_ms: int) -> int:
+    """One-way link delay measured by a DELAY_MEASURE exchange.
+
+    Half of what remains of the round trip once the outstation's reported
+    turnaround is taken out, per the non-LAN time synchronization procedure of
+    IEEE 1815-2012. Clamped at zero: g52v1 reports whole seconds, so its
+    turnaround can exceed a sub-second round trip, and a negative correction
+    would set the outstation behind the master.
+
+    Args:
+        sent_ms: Master clock when DELAY_MEASURE was sent.
+        received_ms: Master clock when its response arrived.
+        outstation_delay_ms: Turnaround the outstation reported in g52.
+
+    Returns:
+        Delay in milliseconds, never negative.
+    """
+    return max(0, (received_ms - sent_ms - outstation_delay_ms) // 2)
+
+
 @dataclass
 class Master:
     """DNP3 Master Station implementation.
@@ -718,6 +766,37 @@ class Master:
         seq = self._state.get_next_request_sequence()
         return build_delay_measure_request(seq=seq)
 
+    def build_record_current_time(self) -> RequestFragment:
+        """Build a RECORD_CURRENT_TIME request.
+
+        Returns:
+            Request fragment for RECORD_CURRENT_TIME.
+        """
+        seq = self._state.get_next_request_sequence()
+        return build_record_current_time_request(seq=seq)
+
+    def build_write_time(self, timestamp: DNP3Timestamp, *, recorded: bool = False) -> RequestFragment:
+        """Build a WRITE that sets the outstation's clock.
+
+        Args:
+            timestamp: Time to write.
+            recorded: Write g50v3, the time RECORD_CURRENT_TIME was sent, as the
+                LAN procedure does. Otherwise write g50v1, the current time.
+
+        Returns:
+            Request fragment for WRITE.
+        """
+        obj: TimeAndDate | TimeAndDateRecorded = TimeAndDateRecorded(timestamp) if recorded else TimeAndDate(timestamp)
+        header = ObjectHeader.build(
+            group=obj.GROUP,
+            variation=obj.VARIATION,
+            prefix=PrefixCode.NONE,
+            range_code=RangeCode.UINT8_COUNT,
+        )
+        block = ObjectBlock(header=header, data=CountRange(count=1).to_bytes_1() + obj.to_bytes())
+        seq = self._state.get_next_request_sequence()
+        return build_write_request((block,), seq=seq)
+
     def build_confirm(self, seq: int, *, uns: bool = False) -> RequestFragment:
         """Build a CONFIRM request.
 
@@ -771,6 +850,7 @@ class Master:
             fin=response.header.control.fin,
             con=response.header.control.con,
             truncation=response.truncation,
+            time_delay_ms=_time_delay_ms(response.objects),
         )
 
         truncation = response.truncation

@@ -6,10 +6,12 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from dnp3.application.builder import build_response
 from dnp3.application.fragment import ObjectBlock
 from dnp3.application.parser import ParseError, parse_response
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import ControlCode, FunctionCode
+from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.master.commands import (
     CommandBuilder,
     ControlOperation,
@@ -26,6 +28,7 @@ from dnp3.master.master import (
     QUALITY_ONLINE,
     QUALITY_STATE,
     Master,
+    propagation_delay_ms,
 )
 from dnp3.master.polling import IntegrityPollTask
 from dnp3.master.state import MasterState
@@ -222,6 +225,26 @@ class TestMasterRequestBuilding:
         fragment = master.build_delay_measure()
 
         assert fragment.header.function == FunctionCode.DELAY_MEASURE
+
+    def test_build_record_current_time(self) -> None:
+        """RECORD_CURRENT_TIME carries no objects and draws the next sequence."""
+        master = Master()
+        previous = master.next_request_sequence()
+
+        fragment = master.build_record_current_time()
+
+        assert fragment.header.function == FunctionCode.RECORD_CURRENT_TIME
+        assert fragment.objects == ()
+        assert fragment.sequence == (previous + 1) % 16
+
+    @pytest.mark.parametrize(("recorded", "variation"), [(False, 0x01), (True, 0x03)], ids=["g50v1", "g50v3"])
+    def test_build_write_time(self, recorded: bool, variation: int) -> None:
+        """A time write is g50, count-qualified with one object."""
+        fragment = Master().build_write_time(DNP3Timestamp(0x0102_0304_0506), recorded=recorded)
+
+        assert fragment.to_bytes() == bytes(
+            [0xC0 | fragment.sequence, 0x02, 0x32, variation, 0x07, 0x01, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        )
 
     def test_build_confirm(self) -> None:
         """Test building CONFIRM request."""
@@ -569,6 +592,57 @@ class TestMasterSelectStoring:
         master.build_select(task2)
 
         assert master._pending_select is task2
+
+
+class TestTimeDelay:
+    """The outstation turnaround reported in g52 reaches `ResponseInfo`."""
+
+    @pytest.mark.parametrize(
+        ("variation", "raw", "expected_ms"),
+        [(2, 250, 250), (1, 2, 2000)],
+        ids=["g52v2-milliseconds", "g52v1-seconds"],
+    )
+    def test_delay_measure_response_sets_time_delay(self, variation: int, raw: int, expected_ms: int) -> None:
+        header = ObjectHeader(group=52, variation=variation, qualifier=0x07)
+        block = ObjectBlock(header=header, data=bytes([0x01]) + raw.to_bytes(2, "little"))
+        response = build_response(objects=(block,), seq=0)
+
+        info = Master().process_response(response.to_bytes())
+
+        assert info is not None
+        assert info.time_delay_ms == expected_ms
+
+    def test_response_without_g52_has_no_time_delay(self) -> None:
+        # g30v1, start 0 stop 0, flags then a 32-bit value.
+        analog = ObjectBlock(header=ObjectHeader(group=30, variation=1, qualifier=0x00), data=bytes(7))
+        info = Master().process_response(build_response(objects=(analog,), seq=0).to_bytes())
+
+        assert info is not None
+        assert info.time_delay_ms is None
+
+    @pytest.mark.parametrize(
+        ("qualifier", "data"),
+        [(0x07, bytes([0x00])), (0x06, b"")],
+        ids=["count-zero", "all-objects"],
+    )
+    def test_g52_without_a_delay_value_has_no_time_delay(self, qualifier: int, data: bytes) -> None:
+        block = ObjectBlock(header=ObjectHeader(group=52, variation=2, qualifier=qualifier), data=data)
+        info = Master().process_response(build_response(objects=(block,), seq=0).to_bytes())
+
+        assert info is not None
+        assert info.time_delay_ms is None
+
+
+class TestPropagationDelay:
+    """One-way delay from a DELAY_MEASURE round trip."""
+
+    def test_propagation_delay(self) -> None:
+        """Half the round trip left after the outstation's turnaround."""
+        assert propagation_delay_ms(sent_ms=1000, received_ms=1300, outstation_delay_ms=100) == 100
+
+    def test_propagation_delay_clamped_to_zero(self) -> None:
+        """A turnaround longer than the round trip gives no delay, not a negative one."""
+        assert propagation_delay_ms(sent_ms=1000, received_ms=1100, outstation_delay_ms=500) == 0
 
 
 class TestProcessResponse:

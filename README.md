@@ -190,6 +190,7 @@ handling, see [docs/mesa-outstation.md](docs/mesa-outstation.md).
 - COLD_RESTART, WARM_RESTART
 - ENABLE_UNSOLICITED, DISABLE_UNSOLICITED
 - DELAY_MEASURE
+- RECORD_CURRENT_TIME (master only)
 
 ### Object Groups
 | Group | Description |

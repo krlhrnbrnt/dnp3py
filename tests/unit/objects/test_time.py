@@ -11,6 +11,7 @@ from dnp3.objects.time import (
     TIME_CTO_GROUP,
     TIME_DELAY_GROUP,
     TimeAndDate,
+    TimeAndDateRecorded,
     TimeCTO,
     TimeCTOUnsync,
     TimeDelayCoarse,
@@ -84,6 +85,25 @@ class TestTimeAndDate:
         original = TimeAndDate(timestamp=ts)
         parsed = TimeAndDate.from_bytes(original.to_bytes())
         assert parsed == original
+
+
+class TestTimeAndDateRecorded:
+    """Tests for TimeAndDateRecorded (g50v3)."""
+
+    def test_g50v3_recorded_time(self) -> None:
+        """g50v3 is a 6-byte little-endian timestamp that round-trips."""
+        assert (TimeAndDateRecorded.GROUP, TimeAndDateRecorded.VARIATION) == (50, 3)
+        assert TimeAndDateRecorded.SIZE == 6
+
+        obj = TimeAndDateRecorded.from_bytes(bytes([0x06, 0x05, 0x04, 0x03, 0x02, 0x01]))
+        assert obj.timestamp == DNP3Timestamp(milliseconds=0x0102_0304_0506)
+        assert TimeAndDateRecorded.from_bytes(obj.to_bytes()) == obj
+
+    @given(st.integers(min_value=0, max_value=2**48 - 1))
+    def test_roundtrip_hypothesis(self, ms: int) -> None:
+        """Property: roundtrip preserves value."""
+        original = TimeAndDateRecorded(timestamp=DNP3Timestamp(milliseconds=ms))
+        assert TimeAndDateRecorded.from_bytes(original.to_bytes()) == original
 
 
 class TestTimeCTO:

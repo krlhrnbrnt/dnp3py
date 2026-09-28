@@ -419,6 +419,19 @@ def build_delay_measure_request(seq: int = 0) -> RequestFragment:
     return RequestFragment(header=header)
 
 
+def build_record_current_time_request(seq: int = 0) -> RequestFragment:
+    """Build a RECORD_CURRENT_TIME request for LAN time sync.
+
+    Args:
+        seq: Sequence number.
+
+    Returns:
+        RequestFragment for RECORD_CURRENT_TIME.
+    """
+    header = RequestHeader.build(function=FunctionCode.RECORD_CURRENT_TIME, seq=seq)
+    return RequestFragment(header=header)
+
+
 def build_cold_restart_request(seq: int = 0) -> RequestFragment:
     """Build a COLD_RESTART request.
 
