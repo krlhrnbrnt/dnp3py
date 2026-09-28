@@ -219,8 +219,9 @@ handling, see [docs/mesa-outstation.md](docs/mesa-outstation.md).
 | Group | Description |
 |-------|-------------|
 | 1, 2 | Binary Input (static, event) |
+| 3, 4 | Double-bit Binary Input (static, event; master decoding only) |
 | 10, 11, 12 | Binary Output (static, event, CROB) |
-| 20, 21, 22 | Counter (static, frozen, event) |
+| 20, 21, 22, 23 | Counter (static, frozen, event, frozen event) |
 | 30, 32 | Analog Input (static, event) |
 | 40, 41, 42 | Analog Output (static, command, event) |
 | 50, 51, 52 | Time objects |

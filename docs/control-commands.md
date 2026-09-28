@@ -153,11 +153,11 @@ until that wiring exists.
 `Master.process_response(data)` parses a response into a `ResponseInfo`
 (function code, IIN, sequence number, unsolicited flag). It does not
 currently decode the per-point `CommandStatus` out of a CROB or analog
-output echo: `Master`'s response-object parsing recognizes groups 1, 2, 10,
-11, 20, 21, 22, 30, 32, 40, and 42 (static data and events), but not group 12
-or 41 (the control echoes), so calling it on a control response is safe and
-returns a `ResponseInfo`, but tells you nothing about whether any individual
-point succeeded. The `CommandResponse` dataclass in
+output echo: `Master`'s response-object parsing delivers groups 1, 2, 3, 4,
+10, 11, 20, 21, 22, 23, 30, 32, 40, 42, 110 and 111 (static data and events),
+but not group 12 or 41 (the control echoes), so calling it on a control
+response is safe and returns a `ResponseInfo`, but tells you nothing about
+whether any individual point succeeded. The `CommandResponse` dataclass in
 `dnp3.master.handler` exists for exactly this purpose but nothing in the
 library constructs one yet.
 
