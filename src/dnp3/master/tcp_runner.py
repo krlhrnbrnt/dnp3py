@@ -34,7 +34,7 @@ from dnp3.application.fragment import RequestFragment
 from dnp3.application.header import MAX_APP_SEQUENCE
 from dnp3.application.parser import ParseError, parse_response_header
 from dnp3.core.enums import LinkFunctionCode
-from dnp3.datalink.builder import build_reset_link_state, build_unconfirmed_user_data
+from dnp3.datalink.builder import build_ack, build_link_status, build_reset_link_state, build_unconfirmed_user_data
 from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
 from dnp3.master.handler import ResponseInfo
@@ -67,6 +67,15 @@ the exchange deadline is left.
 Without a floor a CONFIRM owed as the deadline passes is abandoned before it is
 written, and the outstation resends values the handler already has.
 """
+
+_ACKED_FUNCTION_CODES = frozenset(
+    {
+        LinkFunctionCode.PRI_RESET_LINK_STATE,
+        LinkFunctionCode.PRI_TEST_LINK_STATE,
+        LinkFunctionCode.PRI_CONFIRMED_USER_DATA,
+    }
+)
+"""Primary link function codes a secondary station answers with ACK (IEEE 1815-2012 9.2.4)."""
 
 _USER_DATA_FUNCTION_CODES = frozenset(
     {
@@ -686,7 +695,7 @@ class MasterTcpRunner:
             # yield several, and the fragment that completes here may be followed
             # by frames belonging to the next one.
             while self._pending:
-                fragment = self._consume_frame(self._pending.popleft(), reassembler)
+                fragment = await self._consume_frame(self._pending.popleft(), reassembler)
                 if fragment is not None:
                     return fragment
 
@@ -722,8 +731,8 @@ class MasterTcpRunner:
             # back-to-back segments, into one read makes that routine.
             self._pending.extend(self._parser.feed(data))
 
-    def _consume_frame(self, frame: DataLinkFrame, reassembler: Reassembler) -> bytes | None:
-        """Filter one link frame and offer its segment to the reassembler.
+    async def _consume_frame(self, frame: DataLinkFrame, reassembler: Reassembler) -> bytes | None:
+        """Filter one link frame, answer it if it is a link request, and offer its segment to the reassembler.
 
         Args:
             frame: Frame to consider.
@@ -734,7 +743,8 @@ class MasterTcpRunner:
             skipped or the fragment is still incomplete.
 
         Raises:
-            LinkError: The segment did not fit the stream being reassembled.
+            LinkError: The segment did not fit the stream being reassembled,
+                or a link reply could not be written.
         """
         config = self.master.config
         # Both addresses, not just the destination. A frame merely addressed to
@@ -749,14 +759,18 @@ class MasterTcpRunner:
                 config.outstation_address,
             )
             return None
-        # Link-management frames (ACK, link status) carry no user data
-        # and nothing to reassemble. Checked before the function code
-        # because the codes collide numerically across the PRM bit:
+        # DIR set means a master sent the frame, whatever its source address says.
+        if frame.header.control.dir_from_master:
+            return None
+        # Secondary frames (ACK, NACK, LINK_STATUS) answer the master's own link
+        # requests and carry nothing to reassemble. Checked before the function
+        # code because the codes collide numerically across the PRM bit:
         # SEC_ACK and PRI_RESET_LINK_STATE are both 0, and
         # SEC_NACK and PRI_RESET_USER_PROCESS are both 1.
-        if not frame.user_data:
+        if not frame.header.control.prm:
             return None
-        if frame.header.control.function_code not in _USER_DATA_FUNCTION_CODES:
+        await self._answer_link_request(frame)
+        if frame.header.control.function_code not in _USER_DATA_FUNCTION_CODES or not frame.user_data:
             return None
 
         try:
@@ -769,6 +783,31 @@ class MasterTcpRunner:
             msg = f"Transport reassembly failed: {exc}"
             raise LinkError(msg) from exc
         return None if result is None else result.data
+
+    async def _answer_link_request(self, frame: DataLinkFrame) -> None:
+        """Send the secondary reply a primary frame calls for.
+
+        IEEE 1815-2012 9.2.4: REQUEST_LINK_STATUS gets LINK_STATUS, and
+        RESET_LINK_STATES, TEST_LINK_STATES and CONFIRMED_USER_DATA get ACK.
+        An outstation that goes unanswered retransmits confirmed user data,
+        and may drop the connection after unanswered link-status keep-alives.
+
+        Args:
+            frame: Primary frame from the outstation.
+
+        Raises:
+            LinkError: The reply could not be written.
+        """
+        code = frame.header.control.function_code
+        destination = self.master.config.outstation_address
+        source = self.master.config.address
+        if code == LinkFunctionCode.PRI_REQUEST_LINK_STATUS:
+            reply = build_link_status(destination, source, dir_from_master=True)
+        elif code in _ACKED_FUNCTION_CODES:
+            reply = build_ack(destination, source, dir_from_master=True)
+        else:
+            return
+        await self._write_frame(reply, self._deadline(None))
 
     async def _send_link_reset(self) -> None:
         """Send RESET_LINK_STATE.
