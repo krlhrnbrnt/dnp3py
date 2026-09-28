@@ -179,6 +179,12 @@ _EXPECTED_ROWS = {
     (60, 2): (PointKind.CLASS, 0, 0, False, ValueCodec.NONE, _NO),  # A.26.2
     (60, 3): (PointKind.CLASS, 0, 0, False, ValueCodec.NONE, _NO),  # A.26.3
     (60, 4): (PointKind.CLASS, 0, 0, False, ValueCodec.NONE, _NO),  # A.26.4
+    # g110 and g111: the variation is the string length; variation 0 has no row.
+    **{
+        (group, length): (PointKind.OCTET_STRING, length, 0, False, ValueCodec.OCTETS, _NO)
+        for group in (110, 111)
+        for length in range(1, 256)
+    },
 }
 
 
@@ -364,3 +370,16 @@ class TestDataLength:
     def test_negative_arguments_are_refused(self, count: int, prefix_width: int) -> None:
         with pytest.raises(ValueError, match="non-negative"):
             data_length(_layout(30, 1), count, prefix_width)
+
+
+class TestOctetStringRows:
+    """g110 and g111 are sized by their variation, the string length in octets."""
+
+    @pytest.mark.parametrize("group", [110, 111])
+    def test_variation_is_the_width(self, group: int) -> None:
+        assert object_width(group, 1) == 1
+        assert object_width(group, 255) == 255
+
+    @pytest.mark.parametrize("group", [110, 111])
+    def test_variation_zero_has_no_row(self, group: int) -> None:
+        assert layout_for(group, 0) is None

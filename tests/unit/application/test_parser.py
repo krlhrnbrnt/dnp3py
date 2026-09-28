@@ -760,3 +760,32 @@ class TestTruncationType:
 
         with pytest.raises(dataclasses.FrozenInstanceError):
             truncation.offset = 0  # type: ignore[misc]
+
+
+class TestOctetStringFraming:
+    """g110 and g111 blocks are bounded by their variation, the string length in octets."""
+
+    def test_g110_is_delimited(self) -> None:
+        """g110v4 with two strings carries 8 octets, so the g30v1 block after it is found."""
+        strings = bytes([0x6E, 0x04, 0x00, 0x00, 0x01]) + b"abcdwxyz"
+        blocks, truncation = frame_response_object_blocks(strings + _G7)
+
+        assert blocks == [_block(strings), _block(_G7)]
+        assert truncation is None
+
+    def test_indexed_g111_is_delimited(self) -> None:
+        """g111v2 with qualifier 0x28: each event carries a 2-octet index, then 2 octets."""
+        events = bytes([0x6F, 0x02, 0x28, 0x02, 0x00]) + bytes([0x05, 0x00]) + b"ab" + bytes([0x07, 0x00]) + b"cd"
+        blocks, truncation = frame_response_object_blocks(events + _B1)
+
+        assert blocks == [_block(events), _block(_B1)]
+        assert truncation is None
+
+    def test_variation_zero_is_unsized(self) -> None:
+        """g110v0 names no length, so framing stops at it rather than guess."""
+        data = bytes([0x6E, 0x00, 0x00, 0x00, 0x00, 0x61]) + _B1
+        blocks, truncation = frame_response_object_blocks(data)
+
+        assert blocks == []
+        assert truncation is not None
+        assert truncation.reason is TruncationReason.UNKNOWN_WIDTH

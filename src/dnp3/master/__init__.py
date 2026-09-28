@@ -20,6 +20,7 @@ from dnp3.master.handler import (
     SOEHandler,
 )
 from dnp3.master.master import Master
+from dnp3.master.octet_string import OctetStringHandler, OctetStringValue
 from dnp3.master.polling import (
     ClassPollTask,
     IntegrityPollTask,
@@ -55,6 +56,8 @@ __all__ = [
     "MasterState",
     "MasterStateManager",
     "MasterTcpRunner",
+    "OctetStringHandler",
+    "OctetStringValue",
     "OperateTask",
     "PollScheduler",
     "PollTask",

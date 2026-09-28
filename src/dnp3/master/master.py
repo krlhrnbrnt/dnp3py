@@ -47,6 +47,7 @@ from dnp3.master.handler import (
     ResponseInfo,
     SOEHandler,
 )
+from dnp3.master.octet_string import OctetStringValue, deliver_octet_string
 from dnp3.master.polling import (
     ClassPollTask,
     IntegrityPollTask,
@@ -436,6 +437,17 @@ def _decode_double_bit(block: ObjectBlock, wire: WireLayout, cto: datetime | Non
     ]
 
 
+def _decode_octet_string(block: ObjectBlock, wire: WireLayout, cto: datetime | None) -> list[OctetStringValue]:
+    """Decode octet strings: each object is `wire.width` raw octets, the block's variation."""
+    slots = _block_slots(block)
+    if slots is None:
+        return []
+    return [
+        OctetStringValue(index=index, value=bytes(block.data[payload : payload + wire.width]))
+        for index, payload in _iter_object_slots(slots, block.data, wire.width)
+    ]
+
+
 class _Timed(Protocol):
     """A decoded value, which may carry a timestamp."""
 
@@ -503,7 +515,8 @@ class _KindBatch(Generic[_V]):
 
 # Point kinds the master decodes, each with the callback its values go to.
 # A kind absent here (commands and command events, frozen analog, deadband, time, class)
-# is framed but not delivered. Double-bit values reach only a handler with that callback.
+# is framed but not delivered. Double-bit values and octet strings reach only a handler
+# with that callback.
 _DELIVERIES: Mapping[PointKind, _Delivery] = MappingProxyType(
     {
         PointKind.BINARY_INPUT: _KindDelivery(_decode_binary, lambda h, v, i: h.on_binary_input(v, i)),
@@ -513,6 +526,7 @@ _DELIVERIES: Mapping[PointKind, _Delivery] = MappingProxyType(
         PointKind.ANALOG_OUTPUT: _KindDelivery(_decode_analog, lambda h, v, i: h.on_analog_output(v, i)),
         PointKind.COUNTER: _KindDelivery(_decode_counter, lambda h, v, i: h.on_counter(v, i)),
         PointKind.FROZEN_COUNTER: _KindDelivery(_decode_counter, lambda h, v, i: h.on_frozen_counter(v, i)),
+        PointKind.OCTET_STRING: _KindDelivery(_decode_octet_string, deliver_octet_string),
     }
 )
 

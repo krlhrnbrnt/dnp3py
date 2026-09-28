@@ -14,6 +14,7 @@ from dnp3.core.flags import IIN
 
 if TYPE_CHECKING:
     from dnp3.master.double_bit import DoubleBitValue
+    from dnp3.master.octet_string import OctetStringValue
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,7 @@ class DefaultSOEHandler:
         self._counters: dict[int, CounterValue] = {}
         self._frozen_counters: dict[int, CounterValue] = {}
         self._double_bit_inputs: dict[int, DoubleBitValue] = {}
+        self._octet_strings: dict[int, OctetStringValue] = {}
         self._last_response: ResponseInfo | None = None
 
     @property
@@ -268,6 +270,11 @@ class DefaultSOEHandler:
     def double_bit_inputs(self) -> "dict[int, DoubleBitValue]":
         """Get all double-bit binary input values by index."""
         return self._double_bit_inputs.copy()
+
+    @property
+    def octet_strings(self) -> "dict[int, OctetStringValue]":
+        """Get all octet string values by index."""
+        return self._octet_strings.copy()
 
     @property
     def last_response(self) -> ResponseInfo | None:
@@ -316,6 +323,12 @@ class DefaultSOEHandler:
             self._double_bit_inputs[value.index] = value
         self._last_response = info
 
+    def on_octet_string(self, values: "list[OctetStringValue]", info: ResponseInfo) -> None:
+        """Store octet string values."""
+        for value in values:
+            self._octet_strings[value.index] = value
+        self._last_response = info
+
     def get_binary_input(self, index: int) -> BinaryValue | None:
         """Get a specific binary input value."""
         return self._binary_inputs.get(index)
@@ -344,6 +357,10 @@ class DefaultSOEHandler:
         """Get a specific double-bit binary input value."""
         return self._double_bit_inputs.get(index)
 
+    def get_octet_string(self, index: int) -> "OctetStringValue | None":
+        """Get a specific octet string value."""
+        return self._octet_strings.get(index)
+
     def clear(self) -> None:
         """Clear all stored values."""
         self._binary_inputs.clear()
@@ -353,4 +370,5 @@ class DefaultSOEHandler:
         self._counters.clear()
         self._frozen_counters.clear()
         self._double_bit_inputs.clear()
+        self._octet_strings.clear()
         self._last_response = None

@@ -40,6 +40,7 @@ class PointKind(Enum):
     TIME = "time"
     TIME_DELAY = "time_delay"
     CLASS = "class"
+    OCTET_STRING = "octet_string"
 
 
 class ValueCodec(Enum):
@@ -53,6 +54,7 @@ class ValueCodec(Enum):
     FLOAT32 = "float32"
     FLOAT64 = "float64"
     RECORD = "record"
+    OCTETS = "octets"
 
 
 class TimeKind(Enum):
@@ -297,6 +299,17 @@ _TABLE: dict[tuple[int, int], WireLayout] = {
     (60, 3): _octets(PointKind.CLASS, 0, ValueCodec.NONE, flags=False),
     (60, 4): _octets(PointKind.CLASS, 0, ValueCodec.NONE, flags=False),
 }
+
+# g110 and g111: the variation is the string length in octets (IEEE 1815-2012 Annex A).
+# Variation 0 means any length and is valid only in a READ, so it has no row.
+_OCTET_STRING_GROUPS = (110, 111)
+_TABLE.update(
+    {
+        (group, length): _octets(PointKind.OCTET_STRING, length, ValueCodec.OCTETS, flags=False)
+        for group in _OCTET_STRING_GROUPS
+        for length in range(1, 256)
+    }
+)
 
 LAYOUTS: Mapping[tuple[int, int], WireLayout] = MappingProxyType(_TABLE)
 

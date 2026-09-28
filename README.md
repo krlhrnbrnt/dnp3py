@@ -88,6 +88,29 @@ async def main():
 asyncio.run(main())
 ```
 
+### Octet strings (master)
+
+```python
+import asyncio
+from dnp3.master import DefaultSOEHandler, Master, MasterTcpRunner
+
+async def main():
+    handler = DefaultSOEHandler()
+    master = Master(handler=handler)
+
+    async with MasterTcpRunner(master=master, host="localhost", port=20000) as runner:
+        # Variation 0 asks for strings of any length.
+        await runner.request(master.build_range_poll(group=110, variation=0, start=0, stop=3))
+
+    name = handler.get_octet_string(2)
+    if name is not None:
+        print(name.value.decode("ascii"))
+
+asyncio.run(main())
+```
+
+The master delivers the raw bytes; DNP3 does not define an encoding for them, so decode them as the device documents.
+
 ## MESA IEEE 1815.2 Outstation
 
 The `dnp3.mesa` module is a DER-oriented outstation built on mesa-tool's
@@ -202,6 +225,7 @@ handling, see [docs/mesa-outstation.md](docs/mesa-outstation.md).
 | 40, 41, 42 | Analog Output (static, command, event) |
 | 50, 51, 52 | Time objects |
 | 60 | Class data |
+| 110, 111 | Octet String (static, event; master decoding only) |
 
 ## Development
 
