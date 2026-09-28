@@ -1,6 +1,6 @@
 # 025: The master delivers octet strings (g110, g111)
 
-Status: todo
+Status: done
 Branch: feat/master-octet-string-read
 Depends on: none
 
@@ -89,7 +89,18 @@ the master steps over g110/g111 blocks and drops their contents.
 - Header info per value and per-block delivery (plan 017).
 
 ## Done when
-- [ ] new tests pass
-- [ ] `tests/unit/master/test_handler.py::test_custom_implementation` passes unchanged
-- [ ] `uv run pytest tests/` passes, coverage >= 95%
-- [ ] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+- [x] new tests pass
+- [x] `tests/unit/master/test_handler.py::test_custom_implementation` passes unchanged
+- [x] `uv run pytest tests/` passes, coverage >= 95%
+- [x] `uv run ruff check src/ tests/`, `uv run ruff format --check src/ tests/`, `uv run mypy src/` clean
+
+## Deviations
+- Tests dropped from the steps: `test_is_frozen` (it tests `@dataclass(frozen=True)` itself),
+  `test_g110_uint16_start_stop` and `test_g111_uint16_count_uint16_index` (the Hypothesis round trips build the
+  same 0x01 and 0x28 layouts), and `test_variation_zero_delivers_nothing` (it passed before any octet string code
+  existed, because the parser rejects variation 0 first).
+- Tests added beyond the steps: `test_variation_zero_block_yields_no_values` calls `_parse_octet_string_values`
+  directly. Without the `width == 0` guard, a zero width never exhausts the data, so a uint32 range would yield up to
+  2^32 empty strings. `test_bytearray_data_yields_bytes` pins the `bytes(...)` copy, since `ObjectBlock` is public and
+  its data can be a `bytearray`. `test_static_and_event_for_same_index_both_delivered_in_wire_order` pins the second
+  review focus point.
