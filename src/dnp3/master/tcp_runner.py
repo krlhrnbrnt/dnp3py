@@ -32,21 +32,23 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
-from dnp3.application.fragment import RequestFragment
+from dnp3.application.fragment import ObjectBlock, RequestFragment
 from dnp3.application.header import MAX_APP_SEQUENCE
-from dnp3.application.parser import ParseError, parse_response_header
+from dnp3.application.parser import ParseError, parse_response, parse_response_header
 from dnp3.core.enums import LinkFunctionCode
 from dnp3.core.flags import IIN
 from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.datalink.builder import build_ack, build_link_status, build_reset_link_state, build_unconfirmed_user_data
 from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
+from dnp3.master.command_status import command_point_results
+from dnp3.master.commands import DirectOperateTask, OperateTask, SelectTask
 from dnp3.master.config import TimeSyncMethod
-from dnp3.master.handler import ResponseInfo
+from dnp3.master.handler import CommandPointState, CommandTaskResult, ResponseInfo
 from dnp3.master.master import Master, propagation_delay_ms
 from dnp3.master.polling import PollTask
 from dnp3.transport.reassembler import Reassembler, ReassemblyError
@@ -156,10 +158,12 @@ class _Burst:
             request's own sequence, so the *first* fragment is correlated to the
             request rather than accepted at whatever sequence arrives.
         fragments: Info for each fragment, in arrival order.
+        objects: Object blocks of the latest fragment.
     """
 
     expected_seq: int
     fragments: list[ResponseInfo] = field(default_factory=list)
+    objects: Sequence[ObjectBlock] = ()
 
 
 @dataclass
@@ -386,6 +390,10 @@ class MasterTcpRunner:
 
     async def _exchange(self, request: RequestFragment) -> list[ResponseInfo]:
         """Send a request and consume its response burst; the caller holds the channel."""
+        return (await self._exchange_burst(request)).fragments
+
+    async def _exchange_burst(self, request: RequestFragment) -> _Burst:
+        """`_exchange`, returning the whole burst."""
         # One deadline for the whole exchange, writes included, not one per
         # fragment: a per fragment deadline lets a peer that answers slowly but
         # steadily hold the request open indefinitely.
@@ -400,7 +408,7 @@ class MasterTcpRunner:
             if info.con:
                 await self._send_confirm(info.sequence, uns=False, deadline=deadline)
             if info.fin:
-                return burst.fragments
+                return burst
 
             if len(burst.fragments) >= MAX_BURST_FRAGMENTS:
                 msg = (
@@ -452,6 +460,70 @@ class MasterTcpRunner:
                 ),
                 deadline,
             )
+
+    # -- commands -------------------------------------------------------------
+
+    async def direct_operate(self, task: DirectOperateTask) -> CommandTaskResult:
+        """Send a DIRECT_OPERATE and report each point's echoed status.
+
+        Point failures are returned, not raised. A command is never retried:
+        after a timeout it is unknown whether the outstation carried it out.
+
+        Raises:
+            ValueError: The task has no operations.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or the response spanned
+                more than one fragment.
+        """
+        _require_operations(task)
+        self._require_open()
+        async with self._claim():
+            return await self._command(self.master.build_direct_operate(task))
+
+    async def select_and_operate(self, task: SelectTask) -> CommandTaskResult:
+        """SELECT the task's points, then OPERATE them if every point was selected.
+
+        The OPERATE carries the SELECT's sequence + 1 and the same objects, as
+        select-before-operate requires (IEEE 1815-2012 4.4.4.3). No other
+        request goes out between the two; a CONFIRM for an unsolicited
+        response may. Point failures are returned, not raised: when a point is
+        not selected, no OPERATE is sent and the SELECT's result is returned.
+        After a timeout on OPERATE it is unknown whether it took effect.
+
+        Raises:
+            ValueError: The task has no operations.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response spanned
+                more than one fragment.
+        """
+        _require_operations(task)
+        self._require_open()
+        async with self._claim():
+            # Both built before the SELECT is sent: a request built meanwhile,
+            # such as a poll waiting for the channel, would take n+1.
+            select = self.master.build_select(task)
+            operate = self.master.build_operate(OperateTask(operations=list(task.operations)))
+            result = await self._command(select)
+            if not all(p.state is CommandPointState.SELECT_SUCCESS for p in result.points):
+                return result
+            operated = await self._command(operate)
+            # A point the OPERATE echo didn't match stays SELECT_SUCCESS, as in
+            # opendnp3: selected, but not known to have operated.
+            points = tuple(
+                selected if op.state is CommandPointState.INIT else op
+                for selected, op in zip(result.points, operated.points, strict=True)
+            )
+            return CommandTaskResult(points, operated.iin)
+
+    async def _command(self, request: RequestFragment) -> CommandTaskResult:
+        """Exchange a control request and match its echo; the caller holds the channel."""
+        burst = await self._exchange_burst(request)
+        if len(burst.fragments) != 1:
+            msg = f"Control response spanned {len(burst.fragments)} fragments; expected one"
+            raise MasterRunnerError(msg)
+        return CommandTaskResult(command_point_results(request, burst.objects), burst.fragments[0].iin)
 
     # -- time synchronization -------------------------------------------------
 
@@ -765,8 +837,8 @@ class MasterTcpRunner:
         try:
             header, _ = parse_response_header(data)
         except (ParseError, ValueError, IndexError):
-            # Not a parseable response header; let process_response log and
-            # discard it through the existing path.
+            # Not a parseable response header; `_receive_fragment` logs and
+            # discards it when the full parse fails.
             return True
         if header.control.uns:
             return True
@@ -787,8 +859,8 @@ class MasterTcpRunner:
         try:
             header, _ = parse_response_header(data)
         except (ParseError, ValueError, IndexError):
-            # Not a parseable response header; let process_response log and
-            # discard it through the existing path.
+            # Not a parseable response header; `_receive_fragment` logs and
+            # discards it when the full parse fails.
             return True
         if header.control.uns:
             return True
@@ -854,9 +926,9 @@ class MasterTcpRunner:
         """Read until one application fragment is parsed, or the deadline passes.
 
         When accumulating a solicited burst, the fragment's sequence is checked
-        *before* `Master.process_response` sees it. That ordering is the whole
-        point: `process_response` dispatches parsed values to the SOE handler
-        (`master.py:657`) ahead of its own sequence validation, so a fragment
+        *before* `Master.process_fragment` sees it. That ordering is the whole
+        point: `process_fragment` dispatches parsed values to the SOE handler
+        ahead of its own sequence validation, so a fragment
         rejected afterwards has already delivered its values. Raising later
         would tell the caller something was wrong but leave stale analog values
         sitting in the handler as current.
@@ -885,10 +957,14 @@ class MasterTcpRunner:
                 return None
         elif not self._screen_solicited(burst, data):
             return None
-        info = self.master.process_response(data)
-        if info is None:
-            logger.warning("Discarding %d bytes that did not parse as a response", len(data))
+        try:
+            response = parse_response(data)
+        except ParseError as exc:
+            logger.warning("Discarding %d bytes that did not parse as a response: %s", len(data), exc)
             return None
+        info = self.master.process_fragment(response)
+        if burst is not None and not info.is_unsolicited:
+            burst.objects = response.objects
 
         # An unsolicited response asking for CON must be confirmed whether or
         # not the master is mid-request; the outstation retries until it is.
@@ -1141,6 +1217,12 @@ class MasterTcpRunner:
             msg = "Channel is closed; open() must be awaited before using the runner"
             raise MasterRunnerError(msg)
         return self.channel, self._reassembler
+
+
+def _require_operations(task: DirectOperateTask | SelectTask) -> None:
+    if not task.operations:
+        msg = "Command task has no operations"
+        raise ValueError(msg)
 
 
 def _raise_if_rejected(request: str, responses: list[ResponseInfo]) -> None:

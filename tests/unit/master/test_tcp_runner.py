@@ -26,7 +26,7 @@ from dnp3.application.builder import build_null_response, build_response
 from dnp3.application.fragment import ObjectBlock, Truncation, TruncationReason
 from dnp3.application.parser import parse_request
 from dnp3.application.qualifiers import ObjectHeader
-from dnp3.core.enums import FunctionCode, LinkFunctionCode
+from dnp3.core.enums import CommandStatus, ControlCode, FunctionCode, LinkFunctionCode
 from dnp3.core.flags import IIN
 from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.datalink.builder import (
@@ -36,8 +36,9 @@ from dnp3.datalink.builder import (
 )
 from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
+from dnp3.master.commands import ControlOperation, DirectOperateTask, SelectTask
 from dnp3.master.config import MasterConfig, TimeSyncMethod
-from dnp3.master.handler import ResponseInfo
+from dnp3.master.handler import CommandPointState, ResponseInfo
 from dnp3.master.master import Master
 from dnp3.master.polling import IntegrityPollTask
 from dnp3.master.tcp_runner import (
@@ -52,6 +53,7 @@ from dnp3.objects.time import TimeAndDate, TimeAndDateRecorded
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport_io.channel import ChannelError
 from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
+from tests.unit.master.test_command_status import echo
 
 MASTER_ADDR = 3
 OUTSTATION_ADDR = 1
@@ -2241,16 +2243,26 @@ def time_delay_response(*, seq: int, delay_ms: int) -> bytes:
     return build_response(objects=(block,), seq=seq).to_bytes()
 
 
-Reply = Callable[[int], bytes]
-"""Builds the answer to a request from the request's sequence."""
+Reply = Callable[[bytes], bytes]
+"""Builds the answer to a request from the request's bytes."""
 
 
 def null_reply(iin: IIN | None = None) -> Reply:
-    return lambda seq: build_null_response(iin=iin, seq=seq).to_bytes()
+    return lambda request: build_null_response(iin=iin, seq=request[0] & 0x0F).to_bytes()
 
 
 def delay_reply(delay_ms: int) -> Reply:
-    return lambda seq: time_delay_response(seq=seq, delay_ms=delay_ms)
+    return lambda request: time_delay_response(seq=request[0] & 0x0F, delay_ms=delay_ms)
+
+
+def echo_reply(*statuses: CommandStatus, iin: IIN | None = None) -> Reply:
+    """Answer a control request with its own objects, each carrying the next status."""
+
+    def reply(request: bytes) -> bytes:
+        objects = tuple(echo(parse_request(request), statuses))
+        return build_response(objects=objects, iin=iin, seq=request[0] & 0x0F).to_bytes()
+
+    return reply
 
 
 def answer_requests(
@@ -2272,7 +2284,7 @@ def answer_requests(
             [request] = await peer.read_fragments(1)
             received.append(request)
             reply = replies.get(FunctionCode(request[1]), null_reply())
-            await peer.send_fragment(reply(request[0] & 0x0F))
+            await peer.send_fragment(reply(request))
         return received
 
     return asyncio.create_task(serve())
@@ -2408,7 +2420,7 @@ class TestTimeSync:
         sync = asyncio.create_task(runner.time_sync(method))
         await asyncio.sleep(0.05)
         now[0] = 5_000
-        await peer.send_fragment(null_reply()(poll_request[0] & 0x0F))
+        await peer.send_fragment(null_reply()(poll_request))
         await poll
         responder = answer_requests(peer, 2)
         await sync
@@ -2506,3 +2518,160 @@ class TestStartup:
         await runner.startup()
 
         await assert_nothing_sent(channel)
+
+
+S = CommandStatus
+P = CommandPointState
+
+
+def crobs(*indexes: int) -> list[ControlOperation]:
+    return [ControlOperation(index=index, control_code=ControlCode.LATCH_ON) for index in indexes]
+
+
+def point_states(result: Any) -> list[tuple[CommandPointState, CommandStatus]]:
+    return [(p.state, p.status) for p in result.points]
+
+
+class TestCommands:
+    """`direct_operate()` and `select_and_operate()` report each point's echoed status."""
+
+    async def test_direct_operate_returns_point_statuses(self) -> None:
+        runner, peer, _ = await open_runner()
+        replies = {FunctionCode.DIRECT_OPERATE: echo_reply(S.SUCCESS, S.OUT_OF_RANGE, iin=IIN.DEVICE_RESTART)}
+        responder = answer_requests(peer, 1, replies)
+
+        result = await runner.direct_operate(DirectOperateTask(operations=crobs(0, 1)))
+        await responder
+
+        assert point_states(result) == [(P.SUCCESS, S.SUCCESS), (P.SUCCESS, S.OUT_OF_RANGE)]
+        assert result.iin == IIN.DEVICE_RESTART
+
+    async def test_select_and_operate_sends_operate_after_select(self) -> None:
+        runner, peer, _ = await open_runner()
+        echo_ok = echo_reply(S.SUCCESS, S.SUCCESS)
+        responder = answer_requests(peer, 2, {FunctionCode.SELECT: echo_ok, FunctionCode.OPERATE: echo_ok})
+
+        result = await runner.select_and_operate(SelectTask(operations=crobs(0, 1)))
+        select, operate = await responder
+
+        assert [select[1], operate[1]] == [FunctionCode.SELECT, FunctionCode.OPERATE]
+        assert operate[0] & 0x0F == ((select[0] & 0x0F) + 1) % 16
+        assert operate[2:] == select[2:]
+        assert result.is_success
+
+    async def test_failed_select_sends_no_operate(self) -> None:
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.SELECT: echo_reply(S.SUCCESS, S.LOCAL)})
+
+        result = await runner.select_and_operate(SelectTask(operations=crobs(0, 1)))
+        await responder
+
+        assert point_states(result) == [(P.SELECT_SUCCESS, S.UNDEFINED), (P.SELECT_FAIL, S.LOCAL)]
+        await assert_nothing_sent(channel)
+
+    async def test_rejected_select_sends_no_operate(self) -> None:
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.SELECT: null_reply(IIN.PARAMETER_ERROR)})
+
+        result = await runner.select_and_operate(SelectTask(operations=crobs(0)))
+        await responder
+
+        assert point_states(result) == [(P.INIT, S.UNDEFINED)]
+        assert result.iin & IIN.PARAMETER_ERROR
+        await assert_nothing_sent(channel)
+
+    async def test_unmatched_operate_keeps_select_success(self) -> None:
+        runner, peer, _ = await open_runner()
+        replies = {
+            FunctionCode.SELECT: echo_reply(S.SUCCESS, S.SUCCESS),
+            FunctionCode.OPERATE: null_reply(IIN.PARAMETER_ERROR),
+        }
+        responder = answer_requests(peer, 2, replies)
+
+        result = await runner.select_and_operate(SelectTask(operations=crobs(0, 1)))
+        await responder
+
+        assert point_states(result) == [(P.SELECT_SUCCESS, S.UNDEFINED)] * 2
+        assert result.iin & IIN.PARAMETER_ERROR
+
+    async def test_poll_during_select_waits_and_keeps_operate_sequence(self) -> None:
+        runner, peer, _ = await open_runner()
+        command = asyncio.create_task(runner.select_and_operate(SelectTask(operations=crobs(0))))
+        [select] = await peer.read_fragments(1)
+        poll = asyncio.create_task(runner.poll(IntegrityPollTask(interval=3600.0)))
+        await asyncio.sleep(0.05)
+
+        await peer.send_fragment(echo_reply(S.SUCCESS)(select))
+        [operate] = await peer.read_fragments(1)
+        await peer.send_fragment(echo_reply(S.SUCCESS)(operate))
+        [read] = await peer.read_fragments(1)
+        await peer.send_fragment(null_reply()(read))
+        await command
+        await poll
+
+        seq = select[0] & 0x0F
+        assert [operate[1], read[1]] == [FunctionCode.OPERATE, FunctionCode.READ]
+        assert [operate[0] & 0x0F, read[0] & 0x0F] == [(seq + 1) % 16, (seq + 2) % 16]
+
+    async def test_select_and_operate_sequence_wraps(self) -> None:
+        runner, peer, _ = await open_runner()
+        while runner.master.next_request_sequence() != 14:
+            pass
+        echo_ok = echo_reply(S.SUCCESS)
+        responder = answer_requests(peer, 2, {FunctionCode.SELECT: echo_ok, FunctionCode.OPERATE: echo_ok})
+
+        await runner.select_and_operate(SelectTask(operations=crobs(0)))
+        select, operate = await responder
+
+        assert [select[0] & 0x0F, operate[0] & 0x0F] == [15, 0]
+
+    async def test_unsolicited_during_select_is_confirmed_before_operate(self) -> None:
+        runner, peer, _ = await open_runner()
+        command = asyncio.create_task(runner.select_and_operate(SelectTask(operations=crobs(0))))
+        [select] = await peer.read_fragments(1)
+
+        await peer.send_fragment(unsolicited_response(seq=3, index=0, value=1.0))
+        await peer.send_fragment(echo_reply(S.SUCCESS)(select))
+        confirm, operate = await peer.read_fragments(2)
+        await peer.send_fragment(echo_reply(S.SUCCESS)(operate))
+        await command
+
+        assert confirm == bytes([0xD3, FunctionCode.CONFIRM.value])
+        assert operate[1] == FunctionCode.OPERATE
+        assert operate[0] & 0x0F == ((select[0] & 0x0F) + 1) % 16
+
+    async def test_multi_fragment_command_response_raises(self) -> None:
+        runner, peer, _ = await open_runner()
+        command = asyncio.create_task(runner.direct_operate(DirectOperateTask(operations=crobs(0))))
+        [request] = await peer.read_fragments(1)
+        seq = request[0] & 0x0F
+
+        await peer.send_fragment(analog_response(seq=seq, fir=True, fin=False, con=False, index=0, value=1.0))
+        await peer.send_fragment(
+            analog_response(seq=(seq + 1) % 16, fir=False, fin=True, con=False, index=0, value=1.0)
+        )
+
+        with pytest.raises(MasterRunnerError, match="2 fragments"):
+            await command
+
+    async def test_empty_task_raises_before_sending(self) -> None:
+        runner, _, channel = await open_runner()
+
+        with pytest.raises(ValueError, match="no operations"):
+            await runner.direct_operate(DirectOperateTask())
+        with pytest.raises(ValueError, match="no operations"):
+            await runner.select_and_operate(SelectTask())
+        await assert_nothing_sent(channel)
+
+    async def test_parse_failure_is_logged_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        runner, peer, _ = await open_runner()
+        command = asyncio.create_task(runner.direct_operate(DirectOperateTask(operations=crobs(0))))
+        [request] = await peer.read_fragments(1)
+
+        with caplog.at_level(logging.WARNING):
+            await peer.send_fragment(b"\xc0")
+            await peer.send_fragment(echo_reply(S.SUCCESS)(request))
+            result = await command
+
+        assert result.is_success
+        assert len(caplog.records) == 1

@@ -24,11 +24,20 @@ from typing import Any
 
 import pytest
 
+from dnp3.core.enums import CommandStatus, ControlCode
 from dnp3.core.flags import AnalogQuality, BinaryQuality
-from dnp3.database import AnalogInputConfig, BinaryInputConfig, Database, EventClass
-from dnp3.master import Master, MasterConfig, MasterTcpRunner, TimeSyncMethod
+from dnp3.database import AnalogInputConfig, BinaryInputConfig, BinaryOutputConfig, Database, EventClass
+from dnp3.master import (
+    CommandBuilder,
+    CommandPointState,
+    Master,
+    MasterConfig,
+    MasterTcpRunner,
+    TimeSyncMethod,
+)
 from dnp3.master.handler import ResponseInfo
 from dnp3.outstation import Outstation, OutstationConfig, OutstationTcpRunner
+from dnp3.outstation.handler import CommandHandler, CommandResult, DefaultCommandHandler
 
 MASTER_ADDR = 3
 OUTSTATION_ADDR = 1
@@ -87,6 +96,7 @@ async def _runner_over_tcp(
     database: Database,
     *,
     max_fragment_size: int | None = None,
+    command_handler: CommandHandler | None = None,
     **master_options: Any,
 ) -> AsyncIterator[tuple[MasterTcpRunner, RecordingHandler]]:
     """An open `MasterTcpRunner` connected over a real socket to an `Outstation`.
@@ -95,6 +105,7 @@ async def _runner_over_tcp(
         database: Outstation database to serve.
         max_fragment_size: Outstation fragment cap, to force a multi-fragment
             response when small.
+        command_handler: Outstation command handler; None rejects every control.
         master_options: Passed on to `MasterConfig`.
 
     Yields:
@@ -106,7 +117,9 @@ async def _runner_over_tcp(
         master_address=MASTER_ADDR,
         **extra,
     )
-    outstation = Outstation(config=outstation_config, database=database)
+    outstation = Outstation(
+        config=outstation_config, database=database, handler=command_handler or DefaultCommandHandler()
+    )
     os_runner = OutstationTcpRunner(outstation=outstation, host="127.0.0.1", port=0)
     serve_task = asyncio.create_task(os_runner.run())
 
@@ -259,3 +272,65 @@ class TestStartupOverTcp:
 
         assert handler.binary_inputs == {0: True}
         assert handler.analog_inputs == {0: 725.0}
+
+
+class _AcceptPointZero(DefaultCommandHandler):
+    """Carries out binary output 0 and refuses 1 as out of range."""
+
+    def __init__(self) -> None:
+        self.operated: list[int] = []
+
+    def select_binary_output(
+        self, index: int, code: ControlCode, count: int, on_time: int, off_time: int
+    ) -> CommandResult:
+        return CommandResult.success() if index == 0 else CommandResult.out_of_range()
+
+    def operate_binary_output(
+        self, index: int, code: ControlCode, count: int, on_time: int, off_time: int, select_sequence: int
+    ) -> CommandResult:
+        self.operated.append(index)
+        return CommandResult.success()
+
+    def direct_operate_binary_output(
+        self, index: int, code: ControlCode, count: int, on_time: int, off_time: int
+    ) -> CommandResult:
+        return CommandResult.success() if index == 0 else CommandResult.out_of_range()
+
+
+def _binary_outputs() -> Database:
+    database = Database()
+    for index in (0, 1):
+        database.add_binary_output(index, BinaryOutputConfig())
+    return database
+
+
+class TestCommands:
+    """Controls against a live outstation, reporting each point's status."""
+
+    async def test_direct_operate_reports_out_of_range(self) -> None:
+        async with _runner_over_tcp(_binary_outputs(), command_handler=_AcceptPointZero()) as (runner, _):
+            task = CommandBuilder().latch_on(0).latch_on(1).build_direct_operate()
+            result = await runner.direct_operate(task)
+
+        assert [(p.index, p.state, p.status) for p in result.points] == [
+            (0, CommandPointState.SUCCESS, CommandStatus.SUCCESS),
+            (1, CommandPointState.SUCCESS, CommandStatus.OUT_OF_RANGE),
+        ]
+
+    async def test_select_and_operate_success(self) -> None:
+        handler = _AcceptPointZero()
+        async with _runner_over_tcp(_binary_outputs(), command_handler=handler) as (runner, _):
+            result = await runner.select_and_operate(CommandBuilder().latch_on(0).build_select())
+
+        assert result.is_success
+        assert handler.operated == [0]
+
+    async def test_select_fail_skips_operate(self) -> None:
+        handler = _AcceptPointZero()
+        async with _runner_over_tcp(_binary_outputs(), command_handler=handler) as (runner, _):
+            result = await runner.select_and_operate(CommandBuilder().latch_on(1).build_select())
+
+        assert [(p.state, p.status) for p in result.points] == [
+            (CommandPointState.SELECT_FAIL, CommandStatus.OUT_OF_RANGE)
+        ]
+        assert handler.operated == []

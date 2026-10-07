@@ -835,10 +835,10 @@ class Master:
             logger.warning("Failed to parse response (%d bytes): %s", len(data), exc)
             return None
 
-        return self._process_response_fragment(response)
+        return self.process_fragment(response)
 
-    def _process_response_fragment(self, response: ResponseFragment) -> ResponseInfo:
-        """Process a parsed response fragment.
+    def process_fragment(self, response: ResponseFragment) -> ResponseInfo:
+        """Process a response the caller has already parsed, reporting its values to the SOE handler.
 
         Args:
             response: Parsed response fragment.

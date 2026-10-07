@@ -6,12 +6,16 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+import dnp3.master
+import dnp3.master.handler
 from dnp3.core.enums import CommandStatus, FunctionCode
 from dnp3.core.flags import IIN
 from dnp3.master.handler import (
     AnalogValue,
     BinaryValue,
-    CommandResponse,
+    CommandPointResult,
+    CommandPointState,
+    CommandTaskResult,
     CounterValue,
     DefaultSOEHandler,
     ResponseHandler,
@@ -161,61 +165,59 @@ class TestCounterValue:
         assert cv.quality == quality
 
 
-class TestCommandResponse:
-    """Tests for CommandResponse."""
+def point(state: CommandPointState, status: CommandStatus = CommandStatus.UNDEFINED) -> CommandPointResult:
+    return CommandPointResult(header_index=0, index=0, state=state, status=status)
 
-    def test_success(self) -> None:
-        """Test successful command response."""
-        resp = CommandResponse(index=0, status=CommandStatus.SUCCESS)
 
-        assert resp.index == 0
-        assert resp.status == CommandStatus.SUCCESS
-        assert resp.message == ""
-        assert resp.is_success is True
-
-    def test_failure(self) -> None:
-        """Test failed command response."""
-        resp = CommandResponse(
-            index=5,
-            status=CommandStatus.NOT_SUPPORTED,
-            message="Operation not supported",
+class TestCommandPointResult:
+    def test_keeps_fields(self) -> None:
+        result = CommandPointResult(
+            header_index=1, index=7, state=CommandPointState.SELECT_FAIL, status=CommandStatus.LOCAL
         )
 
-        assert resp.index == 5
-        assert resp.status == CommandStatus.NOT_SUPPORTED
-        assert resp.message == "Operation not supported"
-        assert resp.is_success is False
-
-    def test_various_statuses(self) -> None:
-        """Test various command statuses."""
-        statuses = [
-            CommandStatus.TIMEOUT,
-            CommandStatus.NO_SELECT,
-            CommandStatus.FORMAT_ERROR,
-            CommandStatus.ALREADY_ACTIVE,
-            CommandStatus.HARDWARE_ERROR,
+        assert (result.header_index, result.index, result.state, result.status) == (
+            1,
+            7,
+            CommandPointState.SELECT_FAIL,
             CommandStatus.LOCAL,
-            CommandStatus.TOO_MANY_OBJS,
-            CommandStatus.NOT_AUTHORIZED,
-            CommandStatus.AUTOMATION_INHIBIT,
-            CommandStatus.PROCESSING_LIMITED,
-            CommandStatus.OUT_OF_RANGE,
-            CommandStatus.DOWNSTREAM_LOCAL,
-            CommandStatus.BLOCKED,
-            CommandStatus.CANCELLED,
-            CommandStatus.BLOCKED_OTHER_MASTER,
-            CommandStatus.DOWNSTREAM_FAIL,
+        )
+
+    def test_states_match_opendnp3_values(self) -> None:
+        assert [(s.name, s.value) for s in CommandPointState] == [
+            ("INIT", 0),
+            ("SELECT_SUCCESS", 1),
+            ("SELECT_MISMATCH", 2),
+            ("SELECT_FAIL", 3),
+            ("OPERATE_FAIL", 4),
+            ("SUCCESS", 5),
         ]
 
-        for status in statuses:
-            resp = CommandResponse(index=0, status=status)
-            assert resp.is_success is False
 
-    def test_is_frozen(self) -> None:
-        """Test that CommandResponse is immutable."""
-        resp = CommandResponse(index=0, status=CommandStatus.SUCCESS)
-        with pytest.raises(AttributeError):
-            resp.status = CommandStatus.TIMEOUT  # type: ignore[misc]
+class TestCommandTaskResult:
+    def test_success_when_every_point_succeeded(self) -> None:
+        points = (point(CommandPointState.SUCCESS, CommandStatus.SUCCESS),) * 2
+
+        assert CommandTaskResult(points=points, iin=IIN(0)).is_success
+
+    def test_not_success_when_a_point_reports_a_failure_status(self) -> None:
+        points = (
+            point(CommandPointState.SUCCESS, CommandStatus.SUCCESS),
+            point(CommandPointState.SUCCESS, CommandStatus.OUT_OF_RANGE),
+        )
+
+        assert not CommandTaskResult(points=points, iin=IIN(0)).is_success
+
+    def test_not_success_when_only_selected(self) -> None:
+        points = (point(CommandPointState.SELECT_SUCCESS),)
+
+        assert not CommandTaskResult(points=points, iin=IIN(0)).is_success
+
+    def test_not_success_without_points(self) -> None:
+        assert not CommandTaskResult(points=(), iin=IIN(0)).is_success
+
+    def test_exported_from_master(self) -> None:
+        assert {"CommandPointState", "CommandPointResult", "CommandTaskResult"} <= set(dnp3.master.__all__)
+        assert not hasattr(dnp3.master.handler, "CommandResponse")
 
 
 class TestResponseInfo:

@@ -4,6 +4,7 @@ This module provides the master (client) side of DNP3 communication,
 including polling, command operations, and response handling.
 """
 
+from dnp3.master.command_status import command_point_results
 from dnp3.master.commands import (
     CommandBuilder,
     CommandTask,
@@ -15,6 +16,9 @@ from dnp3.master.commands import (
 from dnp3.master.config import MasterConfig, PollingConfig, TimeSyncMethod
 from dnp3.master.double_bit import DoubleBitInputHandler, DoubleBitValue
 from dnp3.master.handler import (
+    CommandPointResult,
+    CommandPointState,
+    CommandTaskResult,
     DefaultSOEHandler,
     ResponseHandler,
     SOEHandler,
@@ -40,7 +44,10 @@ from dnp3.master.tcp_runner import (
 __all__ = [
     "ClassPollTask",
     "CommandBuilder",
+    "CommandPointResult",
+    "CommandPointState",
     "CommandTask",
+    "CommandTaskResult",
     "ControlOperation",
     "DefaultSOEHandler",
     "DirectOperateTask",
@@ -66,4 +73,5 @@ __all__ = [
     "SelectTask",
     "TimeSyncError",
     "TimeSyncMethod",
+    "command_point_results",
 ]

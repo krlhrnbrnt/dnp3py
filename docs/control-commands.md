@@ -150,60 +150,44 @@ until that wiring exists.
 
 ### Reading the command result
 
-`Master.process_response(data)` parses a response into a `ResponseInfo`
-(function code, IIN, sequence number, unsolicited flag). It does not
-currently decode the per-point `CommandStatus` out of a CROB or analog
-output echo: `Master`'s response-object parsing recognizes groups 1, 2, 10,
-11, 20, 21, 22, 30, 32, 40, and 42 (static data and events), but not group 12
-or 41 (the control echoes), so calling it on a control response is safe and
-returns a `ResponseInfo`, but tells you nothing about whether any individual
-point succeeded. The `CommandResponse` dataclass in
-`dnp3.master.handler` exists for exactly this purpose but nothing in the
-library constructs one yet.
-
-Until that gap closes, the coarse signal is `ResponseInfo.iin`: a set
-`IIN.PARAMETER_ERROR` bit means the outstation could not parse the request at
-all (see "Fail-closed behavior" below). For the actual per-point status, read
-it out of the response bytes yourself. The response echoes the same object
-headers the request used, with only the trailing status byte replaced, so the
-layout to walk is the qualifier-derived layout described in "Wire-level
-reference":
+`MasterTcpRunner` sends a control and matches the outstation's echo to what
+was sent, returning a `CommandTaskResult` with one `CommandPointResult` per
+point:
 
 ```python
-from dnp3.application.parser import parse_response
-from dnp3.core.enums import CommandStatus, QualifierCode
+from dnp3.master import CommandPointState, MasterTcpRunner
 
-def decode_crob_statuses(response_bytes: bytes) -> list[tuple[int, CommandStatus]]:
-    """Decode (index, CommandStatus) pairs from a CROB control response."""
-    response = parse_response(response_bytes)
-    results: list[tuple[int, CommandStatus]] = []
+async with MasterTcpRunner(master=master, host="10.0.0.5") as runner:
+    task = master.command_builder().latch_on(0).pulse_on(3, on_time=500).build_select()
+    result = await runner.select_and_operate(task)
 
-    for block in response.objects:
-        if block.header.group != 12:
-            continue
-        if block.header.qualifier == QualifierCode.UINT8_COUNT_UINT8_INDEX:
-            count_bytes, index_bytes = 1, 1
-        elif block.header.qualifier == QualifierCode.UINT16_COUNT_UINT16_INDEX:
-            count_bytes, index_bytes = 2, 2
-        else:
-            continue
-
-        data = block.data
-        count = int.from_bytes(data[0:count_bytes], "little")
-        offset = count_bytes
-        for _ in range(count):
-            index = int.from_bytes(data[offset : offset + index_bytes], "little")
-            offset += index_bytes
-            offset += 10  # control_code(1) + op_count(1) + on_time(4) + off_time(4)
-            results.append((index, CommandStatus(data[offset])))
-            offset += 1
-
-    return results
+for point in result.points:
+    print(point.index, point.state.name, point.status.name)
+if not result.is_success:
+    print("IIN:", result.iin)
 ```
 
-The same shape applies to Group 41 responses; replace the fixed 10-byte skip
-with the analog output value width for the variation in use (4 bytes for
-Variation 1 and 3, 2 bytes for Variation 2, 8 bytes for Variation 4).
+`select_and_operate` sends the OPERATE only if every point was selected, with
+the SELECT's sequence + 1 and the same objects, and no other request in
+between. `direct_operate(task)` sends one DIRECT_OPERATE. Neither raises on a
+point failure, and neither retries: after a `ResponseTimeoutError` it is
+unknown whether the outstation carried out the command.
+
+Each point ends in one of six states, as in opendnp3:
+
+| State | Meaning |
+|---|---|
+| `INIT` | No matching echo: the header, qualifier, index or point count differed, or the outstation refused the request (see `result.iin`). |
+| `SELECT_SUCCESS` | Selected with status `SUCCESS`, but not operated. |
+| `SELECT_MISMATCH` | The SELECT echo carried different values than were sent. |
+| `SELECT_FAIL` | The SELECT echo matched but its status was not `SUCCESS`; `status` says why. |
+| `OPERATE_FAIL` | The OPERATE or DIRECT_OPERATE echo carried different values than were sent. |
+| `SUCCESS` | The OPERATE or DIRECT_OPERATE echo matched; `status` is what the outstation reported. |
+
+`status` is `UNDEFINED` except for `SUCCESS` and `SELECT_FAIL`, so
+`result.is_success` checks both the state and the status. A caller that drives
+`Master` over its own transport can match an echo itself with
+`command_point_results(request, response.objects)`.
 
 ## Wiring an outstation to receive control commands
 
@@ -398,7 +382,6 @@ control-code Op Type anywhere in the request. It is not set merely because a
 well-formed command was rejected for a business reason: a `NOT_SUPPORTED` or
 `OUT_OF_RANGE` result from your `CommandHandler` leaves `IIN.PARAMETER_ERROR`
 clear, because the request itself was valid; only its outcome was negative.
-Check the per-point `CommandStatus` (via the echoed object, see "Reading the
-command result" above) to distinguish a rejected-but-valid command from a
-successful one; check `IIN.PARAMETER_ERROR` only to detect that the request
-itself was malformed.
+Check `CommandPointResult.status` (see "Reading the command result" above)
+to distinguish a rejected-but-valid command from a successful one; check
+`IIN.PARAMETER_ERROR` only to detect that the request itself was malformed.

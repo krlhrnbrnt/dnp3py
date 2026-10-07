@@ -1,11 +1,14 @@
 """Tests for the Master class."""
 
+import logging
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
 from dnp3.application.builder import build_response
 from dnp3.application.fragment import ObjectBlock
+from dnp3.application.parser import parse_response
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import ControlCode, FunctionCode
 from dnp3.core.timestamp import DNP3Timestamp
@@ -656,3 +659,18 @@ class TestProcessResponse:
         info = Master().process_response(data)
 
         assert info is None or isinstance(info, ResponseInfo)
+
+
+class TestProcessFragment:
+    """`process_fragment` takes an already parsed response."""
+
+    def test_same_info_as_process_response(self) -> None:
+        data = build_response(objects=(), seq=4).to_bytes()
+
+        assert Master().process_fragment(parse_response(data)) == Master().process_response(data)
+
+    def test_parse_failure_returns_none_with_one_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            assert Master().process_response(b"\xc0") is None
+
+        assert len(caplog.records) == 1

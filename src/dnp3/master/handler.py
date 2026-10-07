@@ -6,6 +6,7 @@ static data, events, and command responses.
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from dnp3.application.fragment import Truncation
@@ -67,24 +68,60 @@ class CounterValue:
     timestamp: datetime | None = None
 
 
+class CommandPointState(Enum):
+    """Where one commanded point ended up. Members and values follow opendnp3."""
+
+    INIT = 0
+    """No matching echo arrived for the point."""
+    SELECT_SUCCESS = 1
+    """The SELECT echo matched with status SUCCESS, but no OPERATE completed."""
+    SELECT_MISMATCH = 2
+    """The SELECT echo carried different values than were sent."""
+    SELECT_FAIL = 3
+    """The SELECT echo matched but carried a status other than SUCCESS."""
+    OPERATE_FAIL = 4
+    """The OPERATE or DIRECT_OPERATE echo carried different values than were sent."""
+    SUCCESS = 5
+    """The OPERATE or DIRECT_OPERATE echo matched; `status` says what the outstation did."""
+
+
 @dataclass(frozen=True)
-class CommandResponse:
-    """Response to a control command.
+class CommandPointResult:
+    """Outcome of one point of a control request.
 
     Attributes:
+        header_index: Position of the point's object header in the request.
         index: Point index.
-        status: Command status.
-        message: Optional status message.
+        state: Where the point ended up.
+        status: Status the outstation echoed. Meaningful only for `SUCCESS`
+            and `SELECT_FAIL`; `UNDEFINED` otherwise.
     """
 
+    header_index: int
     index: int
-    status: CommandStatus
-    message: str = ""
+    state: CommandPointState
+    status: CommandStatus = CommandStatus.UNDEFINED
+
+
+@dataclass(frozen=True)
+class CommandTaskResult:
+    """Outcome of a control request, one result per commanded point.
+
+    Attributes:
+        points: Results in wire order: CROBs, then analog outputs.
+        iin: IIN of the last response. When no point was matched, it often
+            says why, for example `PARAMETER_ERROR`.
+    """
+
+    points: tuple[CommandPointResult, ...]
+    iin: IIN
 
     @property
     def is_success(self) -> bool:
-        """Check if command was successful."""
-        return self.status == CommandStatus.SUCCESS
+        """True when every point was operated with status SUCCESS."""
+        return bool(self.points) and all(
+            p.state is CommandPointState.SUCCESS and p.status is CommandStatus.SUCCESS for p in self.points
+        )
 
 
 @dataclass
