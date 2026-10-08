@@ -6,25 +6,18 @@ follow.
 
 ## Setting up
 
-dnp3py uses [pixi](https://pixi.sh) to manage the dev environment.
+dnp3py uses [uv](https://docs.astral.sh/uv/) to manage the dev environment.
 
 ```bash
-pixi install
-pixi run dev-install
+uv sync
+uv run pre-commit install
 ```
 
-Plain `pixi install` sets up `pixi.toml`'s `default` environment, which is
-Python 3.14. CI tests Python 3.11 through 3.13 only, not 3.14, so build and
-test against a CI-tested environment instead:
-
-```bash
-pixi run -e py313 dev-install
-```
-
-`dev-install` runs `pip install -e .` inside the pixi environment. Run every
-check below through `pixi run -e py313 <command>`, or open a shell in that
-environment first with `pixi shell -e py313`; a bare command uses whatever
-Python is first on your PATH, not pixi's.
+`uv sync` creates `.venv` with the `dev` dependency group from
+`pyproject.toml` and an editable install of the package. Its default Python
+comes from `.python-version` (3.14). CI tests Python 3.11 through 3.13 only,
+so add `--python 3.13` to any command below to run it on a CI-tested
+version.
 
 ## Running the checks CI runs
 
@@ -32,39 +25,30 @@ Python is first on your PATH, not pixi's.
 the `test`, `quality`, and `build` jobs, and a pull request merges only once
 it passes. Review is expected on every pull request; it is a project
 practice, not a required approval enforced by GitHub. Run the same commands
-`test`, `quality`, and `build` run, through `pixi run -e py313` or inside
-`pixi shell -e py313`:
+`test`, `quality`, and `build` run:
 
 ```bash
-pytest tests/ -v --tb=short
+uv run pytest tests/ -v --tb=short
 ```
 
 ```bash
-ruff format --check src/ tests/
-ruff check src/ tests/
+uv run ruff format --check src/ tests/
+uv run ruff check src/ tests/
 ```
 
 ```bash
-mypy src/
+uv run mypy src/
 ```
 
 `build` also runs:
 
 ```bash
-python -m build
-twine check dist/*
+uv build
+uvx twine check dist/*
 ```
 
-Neither `build` nor `twine` is in the pixi environment. Install them into a
-scratch environment to run this step locally (`pip install build twine`),
-or skip it and let CI check the package build.
-
-CI's `quality` job pins `ruff==0.15.18` to match `.pre-commit-config.yaml`;
-`pixi.toml` allows a newer ruff, so a locally newer ruff can format or flag
-code differently than CI. Run `pip install "ruff==0.15.18"` in a scratch
-environment if your formatting disagrees with CI, or trust CI as the final
-answer. Installing the pre-commit hooks (`pixi run pre-commit-install`)
-catches most of this before you push.
+The `dev` group pins `ruff==0.15.18`, matching CI's `quality` job and
+`.pre-commit-config.yaml`; update all three together when upgrading ruff.
 
 ## Conventions
 

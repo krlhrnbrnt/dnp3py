@@ -9,35 +9,34 @@ Async I/O via asyncio, strict type annotations, Level 2 subset for SCADA/RTU app
 - **License:** MIT
 - **Python:** 3.11, 3.12, 3.13, 3.14
 - **Build system:** Hatchling
-- **Package manager:** pixi (conda based), with pip for editable installs
+- **Package manager:** uv (dev dependencies in the `dev` dependency group in pyproject.toml, locked in `uv.lock`)
 
 ## Setup
 
 Always use a virtual environment. Never install packages system wide.
 
 ```bash
-pixi install
-pixi run dev-install    # pip install -e . inside pixi env
-pixi run pre-commit-install
+uv sync                       # create .venv, install dev group + editable package
+uv run pre-commit install
 ```
 
 ## Build and Run
 
 ```bash
-pixi run dev-install          # editable install
-python -m build               # build sdist and wheel (requires pip install build)
-twine check dist/*             # verify package metadata
+uv sync                       # editable install (re-run after dependency changes)
+uv build                      # build sdist and wheel
+uvx twine check dist/*        # verify package metadata
 ```
 
 ## Test Commands
 
 ```bash
-pixi run test                 # all tests, verbose
-pixi run test-unit            # unit tests only
-pixi run test-integration     # integration tests only
-pixi run test-cov             # tests with coverage (HTML report, 95% threshold)
-pixi run nox                  # multi-Python matrix via nox
-pixi run -e py311 test        # test against specific Python version
+uv run pytest tests/ -v                     # all tests, verbose
+uv run pytest tests/unit/ -v                # unit tests only
+uv run pytest tests/integration/ -v         # integration tests only
+uv run pytest tests/ --cov=src/dnp3 --cov-report=html --cov-fail-under=95   # coverage (HTML report)
+for v in 3.11 3.12 3.13 3.14; do uv run --python $v pytest tests/; done   # all supported Pythons
+uv run --python 3.11 pytest tests/ -v       # test against specific Python version
 ```
 
 Test dependencies: pytest, pytest-asyncio, pytest-cov, hypothesis.
@@ -47,11 +46,10 @@ Coverage threshold is **95%** (configured in pyproject.toml `tool.coverage.repor
 ## Quality Checks
 
 ```bash
-pixi run lint                 # ruff check
-pixi run format               # ruff format (applies fixes)
-pixi run format-check         # ruff format (check only)
-pixi run typecheck            # mypy strict mode
-pixi run check                # lint + format-check + typecheck combined
+uv run ruff check src/ tests/               # lint
+uv run ruff format src/ tests/              # format (applies fixes)
+uv run ruff format --check src/ tests/      # format (check only)
+uv run mypy src/                            # mypy strict mode
 ```
 
 Pre-commit hooks enforce: trailing whitespace, ruff lint/format, mypy strict, bandit security.
@@ -114,8 +112,8 @@ Note: This is an open source library. CI uses GitHub hosted runners (ubuntu-late
 
 ## Key Files
 
-- `pyproject.toml`: project metadata, tool config, coverage thresholds
-- `pixi.toml`: environment management, task definitions
-- `noxfile.py`: multi-Python test sessions
+- `pyproject.toml`: project metadata, dev dependency group, tool config, coverage thresholds
+- `uv.lock`: locked dev environment (commit changes alongside pyproject.toml)
+- `.python-version`: default Python for `uv sync` (3.14)
 - `.pre-commit-config.yaml`: pre-commit hook definitions
 - `src/dnp3/__init__.py`: version string

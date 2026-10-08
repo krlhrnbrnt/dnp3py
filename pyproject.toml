@@ -28,6 +28,19 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[dependency-groups]
+# Installed by default with `uv sync`. ruff is pinned to match .pre-commit-config.yaml
+# and .github/workflows/ci.yml; update all three together.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.0",
+    "mypy>=1.8",
+    "ruff==0.15.18",
+    "pre-commit>=4.0",
+]
+
 [tool.hatch.version]
 source = "vcs"
 
@@ -90,7 +103,7 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.bandit]
-exclude_dirs = ["tests", ".pixi", ".venv"]
+exclude_dirs = ["tests", ".venv"]
 skips = []
 
 [tool.coverage.run]
