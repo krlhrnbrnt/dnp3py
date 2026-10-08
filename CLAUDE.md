@@ -81,13 +81,25 @@ Outstation and master sit above the application layer.
 
 - **TDD mandatory.** Write failing tests first, then implement, then refactor.
 - **Commit messages:** conventional commits format (`feat:`, `fix:`, `test:`, `refactor:`, `chore:`, `docs:`).
-- **Never squash merge.** Preserve the TDD commit trail.
+- **Squash merge plan branches.** Commit per TDD step on the branch; squash into one conventional commit on merge.
+- **Plans stay out of the code.** New or edited plans in `docs/plans/` go in their own `docs:` commits. The squash merge that implements a plan also deletes it; a dropped plan is deleted in a `docs:` commit. Code, comments, tests and commit messages never mention plans or plan numbers, so the squash commit message, docstrings, comments and README must carry everything a later reader needs.
 - **Immutability preferred.** Create new objects rather than mutating.
 - **Line length:** 120 characters (ruff config).
 - **Quote style:** double quotes.
 - **Type annotations:** required on all public APIs. mypy strict mode enforced.
 - **No console.log/print debug statements** in committed code.
 - **No hardcoded secrets.**
+
+## Comments and Docstrings
+
+A reader of this code has the source and the DNP3 spec, not the conversation that produced it. Write for that reader.
+
+- **No chat leakage.** Never reference the prompt, the request, or the session ("as requested", "the user's scenario", "the case we discussed"). Don't narrate how the code came to be; that belongs in the commit message or PR.
+- **Use cases from a prompt stay in the prompt.** Carry one into a comment only if it records a lasting fact: a spec requirement, a device or vendor quirk, an interop constraint. State that fact directly, not the scenario that surfaced it.
+- **Comment the why.** The code already says what it does. Comments earn their place by recording what the code can't: the spec clause behind a rule (cite IEEE 1815-2012 section numbers), why a check exists, why an obvious alternative was rejected.
+- **Less is more.** No comments on self-explanatory lines, no restating the function name in its docstring, no commented-out code. Prefer a clear name over a comment that explains a vague one.
+- **Keep them true.** A comment is part of the change it describes. When behavior changes, fix or delete the comment in the same commit.
+- **Style.** Short, complete sentences, first word capitalized unless it's an identifier. Block comment above a tricky section; inline comment only for a brief note on that line (e.g. a byte offset or bit meaning in a frame layout).
 
 ## CI/CD
 
