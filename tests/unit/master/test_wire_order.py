@@ -14,7 +14,7 @@ from dnp3.application.fragment import ObjectBlock
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.flags import DoubleBitState
 from dnp3.master import DoubleBitInputHandler, DoubleBitValue, Master
-from dnp3.master.handler import AnalogValue, BinaryValue, CounterValue, ResponseInfo, SOEHandler
+from dnp3.master.handler import AnalogValue, BinaryValue, CounterValue, ResponseInfo, SOEHandler, TimestampQuality
 from tests.unit.master.delivery import RecordingHandler, dispatch
 
 # Response header: app control (FIR+FIN, seq 1), RESPONSE function, 2-byte IIN.
@@ -105,19 +105,41 @@ class TestMixedKindsKeepWireOrder:
         assert handler.sequence == [
             (
                 "on_double_bit_input",
-                [DoubleBitValue(index=10, state=DoubleBitState.ON, quality=ONLINE, timestamp=_at(dbi10))],
+                [
+                    DoubleBitValue(
+                        index=10,
+                        state=DoubleBitState.ON,
+                        quality=ONLINE,
+                        timestamp=_at(dbi10),
+                        timestamp_quality=TimestampQuality.SYNCHRONIZED,
+                    )
+                ],
             ),
             (
                 "on_binary_input",
                 [
                     BinaryValue(index=14, value=False, quality=ONLINE),
                     BinaryValue(index=25, value=True, quality=ONLINE),
-                    BinaryValue(index=2, value=True, quality=ONLINE, timestamp=_at(bi2)),
+                    BinaryValue(
+                        index=2,
+                        value=True,
+                        quality=ONLINE,
+                        timestamp=_at(bi2),
+                        timestamp_quality=TimestampQuality.SYNCHRONIZED,
+                    ),
                 ],
             ),
             (
                 "on_double_bit_input",
-                [DoubleBitValue(index=12, state=DoubleBitState.OFF, quality=ONLINE, timestamp=_at(dbi12))],
+                [
+                    DoubleBitValue(
+                        index=12,
+                        state=DoubleBitState.OFF,
+                        quality=ONLINE,
+                        timestamp=_at(dbi12),
+                        timestamp_quality=TimestampQuality.SYNCHRONIZED,
+                    )
+                ],
             ),
             (
                 "on_binary_input",
@@ -190,7 +212,13 @@ class TestRunsOfOneKind:
                     BinaryValue(index=9, value=True, quality=ONLINE),
                     BinaryValue(index=0, value=False, quality=ONLINE),
                     BinaryValue(index=1, value=True, quality=ONLINE),
-                    BinaryValue(index=4, value=False, quality=ONLINE, timestamp=_at(bi9)),
+                    BinaryValue(
+                        index=4,
+                        value=False,
+                        quality=ONLINE,
+                        timestamp=_at(bi9),
+                        timestamp_quality=TimestampQuality.SYNCHRONIZED,
+                    ),
                 ],
             ),
         ]

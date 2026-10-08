@@ -11,7 +11,7 @@ response fragment, the same public entry point an outstation reply reaches.
 import struct
 from datetime import UTC, datetime, timedelta
 
-from dnp3.master.handler import AnalogValue, CounterValue, ResponseInfo, SOEHandler
+from dnp3.master.handler import AnalogValue, CounterValue, ResponseInfo, SOEHandler, TimestampQuality
 from dnp3.master.master import QUALITY_ONLINE, Master
 
 # Response header: app control (FIR+FIN, seq 1), RESPONSE function, 2-byte IIN.
@@ -118,13 +118,27 @@ class TestGroup21RemainingVariations:
         # A.11.7.2.2: BSTR8 flag, UINT32 count, DNP3TIME.
         handler = _deliver(_block(21, 7, 1, bytes([0x21]) + struct.pack("<I", 0x12345678) + _TIME_OCTETS))
         assert handler.frozen_counters == [
-            CounterValue(index=1, value=0x12345678, quality=0x21, timestamp=_EXPECTED_TIME)
+            CounterValue(
+                index=1,
+                value=0x12345678,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            )
         ]
 
     def test_g21v8_16bit_with_flag_and_time_delta(self) -> None:
         # A.11.8.2.2: BSTR8 flag, UINT16 count, DNP3TIME.
         handler = _deliver(_block(21, 8, 1, bytes([0x21]) + struct.pack("<H", 0x1234) + _TIME_OCTETS))
-        assert handler.frozen_counters == [CounterValue(index=1, value=0x1234, quality=0x21, timestamp=_EXPECTED_TIME)]
+        assert handler.frozen_counters == [
+            CounterValue(
+                index=1,
+                value=0x1234,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            )
+        ]
 
     def test_g21v9_32bit_without_flag(self) -> None:
         # A.11.9.2.2: UINT32 count, no flag octet. Required by IEEE 1815.2-2025 Table 7.
@@ -176,9 +190,25 @@ class TestGroup22Delta:
     def test_g22v7_32bit_with_flag_and_time_delta(self) -> None:
         # A.12.7.2.2: BSTR8 flag, UINT32 count, DNP3TIME.
         handler = _deliver(_block(22, 7, 1, bytes([0x21]) + struct.pack("<I", 0x12345678) + _TIME_OCTETS))
-        assert handler.counters == [CounterValue(index=1, value=0x12345678, quality=0x21, timestamp=_EXPECTED_TIME)]
+        assert handler.counters == [
+            CounterValue(
+                index=1,
+                value=0x12345678,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            )
+        ]
 
     def test_g22v8_16bit_with_flag_and_time_delta(self) -> None:
         # A.12.8.2.2: BSTR8 flag, UINT16 count, DNP3TIME.
         handler = _deliver(_block(22, 8, 1, bytes([0x21]) + struct.pack("<H", 0x1234) + _TIME_OCTETS))
-        assert handler.counters == [CounterValue(index=1, value=0x1234, quality=0x21, timestamp=_EXPECTED_TIME)]
+        assert handler.counters == [
+            CounterValue(
+                index=1,
+                value=0x1234,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            )
+        ]

@@ -9,7 +9,7 @@ craigpnnl/dnp3py#74.
 
 from datetime import UTC, datetime, timedelta
 
-from dnp3.master.handler import CounterValue, DefaultSOEHandler
+from dnp3.master.handler import CounterValue, DefaultSOEHandler, TimestampQuality
 from dnp3.master.master import Master
 
 # Response header: app control (FIR+FIN, seq 1), RESPONSE function, 2-byte IIN.
@@ -81,7 +81,14 @@ class TestFrozenCounterEventVariations:
         body = _header(23, 5) + bytes([0x21]) + (0x12345678).to_bytes(4, "little") + _TIME_OCTETS
         handler = _deliver(body)
         _assert_only_frozen_counter(
-            handler, CounterValue(index=0, value=0x12345678, quality=0x21, timestamp=_EXPECTED_TIME)
+            handler,
+            CounterValue(
+                index=0,
+                value=0x12345678,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            ),
         )
 
     def test_g23v6_16bit_with_flag_and_time(self) -> None:
@@ -89,7 +96,14 @@ class TestFrozenCounterEventVariations:
         body = _header(23, 6) + bytes([0x61]) + (0x1234).to_bytes(2, "little") + _TIME_OCTETS
         handler = _deliver(body)
         _assert_only_frozen_counter(
-            handler, CounterValue(index=0, value=0x1234, quality=0x61, timestamp=_EXPECTED_TIME)
+            handler,
+            CounterValue(
+                index=0,
+                value=0x1234,
+                quality=0x61,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            ),
         )
 
     def test_g23v7_32bit_with_flag_and_time_delta(self) -> None:
@@ -97,7 +111,14 @@ class TestFrozenCounterEventVariations:
         body = _header(23, 7) + bytes([0x09]) + (0x0A0B0C0D).to_bytes(4, "little") + _TIME_OCTETS
         handler = _deliver(body)
         _assert_only_frozen_counter(
-            handler, CounterValue(index=0, value=0x0A0B0C0D, quality=0x09, timestamp=_EXPECTED_TIME)
+            handler,
+            CounterValue(
+                index=0,
+                value=0x0A0B0C0D,
+                quality=0x09,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            ),
         )
 
     def test_g23v8_16bit_with_flag_and_time_delta(self) -> None:
@@ -105,7 +126,14 @@ class TestFrozenCounterEventVariations:
         body = _header(23, 8) + bytes([0x0D]) + (0x0BCD).to_bytes(2, "little") + _TIME_OCTETS
         handler = _deliver(body)
         _assert_only_frozen_counter(
-            handler, CounterValue(index=0, value=0x0BCD, quality=0x0D, timestamp=_EXPECTED_TIME)
+            handler,
+            CounterValue(
+                index=0,
+                value=0x0BCD,
+                quality=0x0D,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            ),
         )
 
 
@@ -120,7 +148,13 @@ class TestFrozenCounterBlockAheadOfAnalogBlock:
         handler = _deliver(g23_block + g30_block)
 
         assert handler.frozen_counters == {
-            0: CounterValue(index=0, value=0x12345678, quality=0x21, timestamp=_EXPECTED_TIME)
+            0: CounterValue(
+                index=0,
+                value=0x12345678,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            )
         }
         assert handler.analog_inputs[0].value == 2401.0
         assert handler.analog_inputs[0].quality == 0x01
@@ -149,6 +183,18 @@ class TestGroup23TwoObjectsWithIndexPrefix:
         )
         handler = _deliver(data)
         assert handler.frozen_counters == {
-            12: CounterValue(index=12, value=0x80000001, quality=0x21, timestamp=_EXPECTED_TIME),
-            200: CounterValue(index=200, value=0x12345678, quality=0x03, timestamp=_EXPECTED_TIME),
+            12: CounterValue(
+                index=12,
+                value=0x80000001,
+                quality=0x21,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            ),
+            200: CounterValue(
+                index=200,
+                value=0x12345678,
+                quality=0x03,
+                timestamp=_EXPECTED_TIME,
+                timestamp_quality=TimestampQuality.SYNCHRONIZED,
+            ),
         }

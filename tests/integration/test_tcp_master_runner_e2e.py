@@ -20,22 +20,31 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from dnp3.core.enums import CommandStatus, ControlCode
 from dnp3.core.flags import AnalogQuality, BinaryQuality
-from dnp3.database import AnalogInputConfig, BinaryInputConfig, BinaryOutputConfig, Database, EventClass
+from dnp3.database import (
+    AnalogInputConfig,
+    BinaryInputConfig,
+    BinaryOutputConfig,
+    CounterConfig,
+    Database,
+    EventClass,
+)
 from dnp3.master import (
     CommandBuilder,
     CommandPointState,
     Master,
     MasterConfig,
     MasterTcpRunner,
+    TimestampQuality,
     TimeSyncMethod,
 )
-from dnp3.master.handler import ResponseInfo
+from dnp3.master.handler import CounterValue, ResponseInfo
 from dnp3.outstation import Outstation, OutstationConfig, OutstationTcpRunner
 from dnp3.outstation.handler import CommandHandler, CommandResult, DefaultCommandHandler
 
@@ -56,6 +65,7 @@ class RecordingHandler:
     def __init__(self) -> None:
         self.binary_inputs: dict[int, bool] = {}
         self.analog_inputs: dict[int, float] = {}
+        self.counters: dict[int, CounterValue] = {}
         self.responses: list[ResponseInfo] = []
 
     def on_binary_input(self, values: list, info: ResponseInfo) -> None:
@@ -71,7 +81,7 @@ class RecordingHandler:
         pass
 
     def on_counter(self, values: list, info: ResponseInfo) -> None:
-        pass
+        self.counters.update({v.index: v for v in values})
 
     def on_frozen_counter(self, values: list, info: ResponseInfo) -> None:
         pass
@@ -193,6 +203,30 @@ class TestIntegrityPollOverTcp:
         assert handler.binary_inputs == {0: True, 1: False}
         assert handler.analog_inputs == {0: 2401.0}
         assert infos[-1].fin is True
+
+
+class TestEventTimestampOverTcp:
+    """An event's time of change reaches the handler."""
+
+    async def test_counter_event_timestamp(self) -> None:
+        """The outstation's g22v5 change time arrives as a synchronized UTC datetime.
+
+        DNP3TIME has 1 ms resolution (11.3), so the wire time may fall up to 1 ms before `before`.
+        """
+        database = Database()
+        database.add_counter(0, CounterConfig(event_class=EventClass.CLASS_1))
+        before = datetime.now(UTC)
+        database.update_counter(0, value=7)
+        after = datetime.now(UTC)
+
+        async with _runner_over_tcp(database) as (runner, handler):
+            await asyncio.wait_for(runner.class_poll(), timeout=POLL_TIMEOUT)
+
+        value = handler.counters[0]
+        assert value.value == 7
+        assert value.timestamp is not None
+        assert before - timedelta(milliseconds=1) <= value.timestamp <= after
+        assert value.timestamp_quality is TimestampQuality.SYNCHRONIZED
 
 
 class TestMultiFragmentOverTcp:

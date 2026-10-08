@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from dnp3.core.flags import DoubleBitState
-from dnp3.master.handler import ResponseInfo
+from dnp3.master.handler import ResponseInfo, TimestampQuality
 
 __all__ = [
     "DOUBLE_BIT_FLAGS_MASK",
@@ -37,12 +37,14 @@ class DoubleBitValue:
         state: One of the four double-bit states.
         quality: Flag bits 0 to 5, with the state bits cleared.
         timestamp: Event timestamp if available.
+        timestamp_quality: Whether `timestamp` came from a synchronized clock.
     """
 
     index: int
     state: DoubleBitState
     quality: int = 0
     timestamp: datetime | None = None
+    timestamp_quality: TimestampQuality = TimestampQuality.INVALID
 
 
 @runtime_checkable

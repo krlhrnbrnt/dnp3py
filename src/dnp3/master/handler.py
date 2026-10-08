@@ -18,6 +18,21 @@ if TYPE_CHECKING:
     from dnp3.master.octet_string import OctetStringValue
 
 
+class TimestampQuality(Enum):
+    """How far a value's `timestamp` can be trusted. Members follow opendnp3.
+
+    This reports only what the object says. Whether the outstation's clock has
+    been set is IIN1.4 NEED_TIME, which the master does not apply here.
+    """
+
+    SYNCHRONIZED = 1
+    """The object carries an absolute time, or a relative time from a g51v1 CTO (A.24.1)."""
+    UNSYNCHRONIZED = 2
+    """A relative time from a g51v2 CTO: the outstation's clock was not synchronized (A.24.2)."""
+    INVALID = 3
+    """There is no timestamp."""
+
+
 @dataclass(frozen=True)
 class BinaryValue:
     """Binary input/output value from response.
@@ -27,12 +42,14 @@ class BinaryValue:
         value: Binary state (True=ON, False=OFF).
         quality: Quality flags.
         timestamp: Event timestamp if available.
+        timestamp_quality: Whether `timestamp` came from a synchronized clock.
     """
 
     index: int
     value: bool
     quality: int = 0
     timestamp: datetime | None = None
+    timestamp_quality: TimestampQuality = TimestampQuality.INVALID
 
 
 @dataclass(frozen=True)
@@ -44,12 +61,14 @@ class AnalogValue:
         value: Analog value.
         quality: Quality flags.
         timestamp: Event timestamp if available.
+        timestamp_quality: Whether `timestamp` came from a synchronized clock.
     """
 
     index: int
     value: float
     quality: int = 0
     timestamp: datetime | None = None
+    timestamp_quality: TimestampQuality = TimestampQuality.INVALID
 
 
 @dataclass(frozen=True)
@@ -61,12 +80,14 @@ class CounterValue:
         value: Counter value.
         quality: Quality flags.
         timestamp: Event timestamp if available.
+        timestamp_quality: Whether `timestamp` came from a synchronized clock.
     """
 
     index: int
     value: int
     quality: int = 0
     timestamp: datetime | None = None
+    timestamp_quality: TimestampQuality = TimestampQuality.INVALID
 
 
 class CommandPointState(Enum):

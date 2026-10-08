@@ -118,6 +118,25 @@ asyncio.run(main())
 The master delivers the raw bytes; DNP3 does not define an encoding for them, so decode them as the device documents.
 `write_octet_string()` raises `RequestRejectedError` when the outstation answers that it did not carry out the write.
 
+### Event timestamps (master)
+
+```python
+from dnp3.master import DefaultSOEHandler, TimestampQuality
+
+class PrintingHandler(DefaultSOEHandler):
+    def on_counter(self, values, info):
+        super().on_counter(values, info)
+        for value in values:
+            if value.timestamp_quality is TimestampQuality.SYNCHRONIZED:
+                print(value.index, value.value, value.timestamp.isoformat())  # UTC
+```
+
+A value from a variation that carries a time has `timestamp` set to a UTC `datetime`, unless it is a relative time
+with no common time of occurrence before it in the fragment (counted in `info.relative_time_without_cto`).
+`timestamp_quality` is `UNSYNCHRONIZED` when the outstation reported its clock unsynchronized (a g51v2 common time),
+and `INVALID` when the value has no timestamp. `SYNCHRONIZED` reflects only the object: check `info.iin` for
+`NEED_TIME` to learn whether the outstation's clock has been set.
+
 ## MESA IEEE 1815.2 Outstation
 
 The `dnp3.mesa` module is a DER-oriented outstation built on mesa-tool's

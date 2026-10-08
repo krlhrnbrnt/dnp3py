@@ -21,6 +21,7 @@ from dnp3.master.handler import (
     ResponseHandler,
     ResponseInfo,
     SOEHandler,
+    TimestampQuality,
 )
 
 
@@ -601,3 +602,7 @@ class TestResponseHandlerProtocol:
 
         handler.on_communication_error(TimeoutError("Test"))
         assert len(handler.errors) == 1
+
+
+def test_timestamp_quality_exported_from_master() -> None:
+    assert dnp3.master.TimestampQuality is TimestampQuality

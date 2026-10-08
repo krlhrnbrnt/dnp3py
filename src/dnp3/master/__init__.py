@@ -22,6 +22,7 @@ from dnp3.master.handler import (
     DefaultSOEHandler,
     ResponseHandler,
     SOEHandler,
+    TimestampQuality,
 )
 from dnp3.master.master import Master
 from dnp3.master.octet_string import OctetStringHandler, OctetStringValue
@@ -78,5 +79,6 @@ __all__ = [
     "SelectTask",
     "TimeSyncError",
     "TimeSyncMethod",
+    "TimestampQuality",
     "command_point_results",
 ]

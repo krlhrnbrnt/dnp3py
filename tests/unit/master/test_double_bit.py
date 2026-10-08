@@ -14,7 +14,7 @@ from dnp3.application.fragment import Truncation, TruncationReason
 from dnp3.core.flags import DoubleBitState
 from dnp3.master import DefaultSOEHandler, DoubleBitInputHandler, DoubleBitValue, Master
 from dnp3.master.double_bit import unpack_double_bit_states
-from dnp3.master.handler import AnalogValue, BinaryValue, ResponseInfo, SOEHandler
+from dnp3.master.handler import AnalogValue, BinaryValue, ResponseInfo, SOEHandler, TimestampQuality
 from tests.unit.master.delivery import RecordingHandler
 
 # Response header: app control (FIR+FIN, seq 1), RESPONSE function, 2-byte IIN.
@@ -205,6 +205,7 @@ class TestG4Events:
                     state=DoubleBitState.INDETERMINATE,
                     quality=ONLINE,
                     timestamp=datetime(2023, 11, 14, 22, 13, 20, 123000, tzinfo=UTC),
+                    timestamp_quality=TimestampQuality.SYNCHRONIZED,
                 )
             ]
         ]

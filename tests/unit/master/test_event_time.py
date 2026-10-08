@@ -16,7 +16,14 @@ import pytest
 from dnp3.application.fragment import ObjectBlock
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.flags import DoubleBitState
-from dnp3.master.handler import AnalogValue, BinaryValue, DefaultSOEHandler, ResponseInfo, SOEHandler
+from dnp3.master.handler import (
+    AnalogValue,
+    BinaryValue,
+    DefaultSOEHandler,
+    ResponseInfo,
+    SOEHandler,
+    TimestampQuality,
+)
 from dnp3.master.master import Master
 from tests.unit.master.delivery import RecordingHandler, response_info
 
@@ -85,11 +92,12 @@ def test_absolute_time_delivered(
     assert info is not None
     values = getattr(handler, attr)
     assert values[1].timestamp == _EXPECTED, clause
+    assert values[1].timestamp_quality is TimestampQuality.SYNCHRONIZED, clause
     assert info.relative_time_without_cto == 0
 
 
 def test_no_time_row_stays_none() -> None:
-    """g2v1 (A.3.1) carries no time field: timestamp stays None."""
+    """g2v1 (A.3.1) carries no time field: timestamp stays None, quality INVALID."""
     handler = DefaultSOEHandler()
     master = Master(handler=handler)
     data = _event_response(2, 1, index=1, value=b"", flags=FLAGS_ON)
@@ -97,6 +105,16 @@ def test_no_time_row_stays_none() -> None:
     master.process_response(data)
 
     assert handler.binary_inputs[1].timestamp is None
+    assert handler.binary_inputs[1].timestamp_quality is TimestampQuality.INVALID
+
+
+def test_static_value_has_invalid_quality() -> None:
+    """g1v2 (A.2.2) carries no time field."""
+    handler = DefaultSOEHandler()
+    Master(handler=handler).process_response(RESPONSE_HEADER + bytes([1, 2, 0x00, 0x01, 0x01, FLAGS_ON]))
+
+    assert handler.binary_inputs[1].timestamp is None
+    assert handler.binary_inputs[1].timestamp_quality is TimestampQuality.INVALID
 
 
 # A.24.1 and A.24.2: a g51 common time of occurrence (CTO) is a DNP3TIME; each
@@ -132,6 +150,7 @@ def test_cto_then_binary_relative_events() -> None:
     first, second = handler.binary_inputs[1], handler.binary_inputs[2]
     assert (first.value, first.quality, first.timestamp) == (True, 0x01, _CTO + timedelta(milliseconds=250))
     assert (second.value, second.quality, second.timestamp) == (False, 0x01, _CTO + timedelta(milliseconds=1000))
+    assert first.timestamp_quality is second.timestamp_quality is TimestampQuality.SYNCHRONIZED
     assert info.relative_time_without_cto == 0
 
 
@@ -143,6 +162,7 @@ def test_cto_then_double_bit_relative_event() -> None:
     value = handler.double_bit_inputs[3]
     assert (value.state, value.quality) == (DoubleBitState.ON, 0x01)
     assert value.timestamp == _CTO + timedelta(milliseconds=42)
+    assert value.timestamp_quality is TimestampQuality.SYNCHRONIZED
     assert info.relative_time_without_cto == 0
 
 
@@ -179,6 +199,7 @@ def test_relative_event_without_cto_has_no_timestamp_and_is_counted() -> None:
 
     assert handler.binary_inputs[1].timestamp is None
     assert handler.binary_inputs[2].timestamp is None
+    assert handler.binary_inputs[1].timestamp_quality is TimestampQuality.INVALID
     assert handler.binary_inputs[1].value is True
     assert info.relative_time_without_cto == 2
 
@@ -209,13 +230,26 @@ def test_cto_does_not_carry_into_the_next_fragment() -> None:
     assert (first.relative_time_without_cto, second.relative_time_without_cto) == (0, 1)
 
 
-def test_unsynchronized_cto_gives_the_same_arithmetic() -> None:
+def test_unsynchronized_cto_gives_the_same_arithmetic_marked_unsynchronized() -> None:
     """A.24.2: g51v2 differs from g51v1 only in the outstation's synchronization state."""
     handler = DefaultSOEHandler()
-    info = _process(_cto(_CTO_MS, variation=2) + _relative(2, [(1, FLAGS_ON, 250)]), handler)
+    objects = _cto(_CTO_MS, variation=2) + _relative(2, [(1, FLAGS_ON, 250)]) + _relative(4, [(3, 0x81, 42)])
+    info = _process(objects, handler)
 
-    assert handler.binary_inputs[1].timestamp == _CTO + timedelta(milliseconds=250)
+    binary, double_bit = handler.binary_inputs[1], handler.double_bit_inputs[3]
+    assert binary.timestamp == _CTO + timedelta(milliseconds=250)
+    assert double_bit.timestamp == _CTO + timedelta(milliseconds=42)
+    assert binary.timestamp_quality is double_bit.timestamp_quality is TimestampQuality.UNSYNCHRONIZED
     assert info.relative_time_without_cto == 0
+
+
+def test_synchronized_cto_after_unsynchronized_one_marks_synchronized() -> None:
+    """The quality follows the CTO in force, like its time."""
+    handler = DefaultSOEHandler()
+    objects = _cto(_CTO_MS, variation=2) + _cto(_CTO_MS) + _relative(2, [(1, FLAGS_ON, 250)])
+    _process(objects, handler)
+
+    assert handler.binary_inputs[1].timestamp_quality is TimestampQuality.SYNCHRONIZED
 
 
 def test_relative_offset_at_its_maximum() -> None:
@@ -257,6 +291,7 @@ def test_time_field_beyond_datetime_range_yields_none_not_a_crash() -> None:
     value = handler.analog_inputs[1]
     assert value.value == -1500.0
     assert value.timestamp is None
+    assert value.timestamp_quality is TimestampQuality.INVALID
 
 
 # The last millisecond datetime can represent (9999-12-31 23:59:59.999 UTC)

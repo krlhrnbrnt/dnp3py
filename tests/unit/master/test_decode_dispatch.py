@@ -14,7 +14,7 @@ import pytest
 
 from dnp3.application.fragment import ObjectBlock
 from dnp3.application.qualifiers import ObjectHeader
-from dnp3.master.handler import AnalogValue, BinaryValue, CounterValue
+from dnp3.master.handler import AnalogValue, BinaryValue, CounterValue, TimestampQuality
 from dnp3.master.master import Master
 from dnp3.objects.layout import LAYOUTS, PointKind, TimeKind, ValueCodec, WireLayout
 from tests.unit.master.delivery import PointValue, RecordingHandler, delivered, dispatch
@@ -44,6 +44,11 @@ EXPECTED_TIME_2 = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=_TIM
 def _expected_timestamp(layout: WireLayout) -> datetime | None:
     """The timestamp a layout's decoded value must carry: real for absolute time, else None."""
     return EXPECTED_TIME if layout.time is TimeKind.ABSOLUTE else None
+
+
+def _expected_quality(layout: WireLayout) -> TimestampQuality:
+    """The timestamp quality a layout's decoded value must carry."""
+    return TimestampQuality.SYNCHRONIZED if layout.time is TimeKind.ABSOLUTE else TimestampQuality.INVALID
 
 
 CALLBACK_BY_KIND = {
@@ -183,7 +188,11 @@ def _row_object(layout: WireLayout) -> tuple[bytes, PointValue]:
         return bytes([0x01]), BinaryValue(index=ROW_INDEX, value=True, quality=0x01)
     if kind in {PointKind.BINARY_INPUT, PointKind.BINARY_OUTPUT}:
         return bytes([ROW_FLAGS]) + TIME_OCTETS[: layout.time.octets], BinaryValue(
-            index=ROW_INDEX, value=True, quality=ROW_FLAGS & 0x7F, timestamp=_expected_timestamp(layout)
+            index=ROW_INDEX,
+            value=True,
+            quality=ROW_FLAGS & 0x7F,
+            timestamp=_expected_timestamp(layout),
+            timestamp_quality=_expected_quality(layout),
         )
     octets, value = _ROW_VALUES[(layout.codec, layout.value_width)]
     flags = bytes([ROW_FLAGS]) if layout.has_flags else b""
@@ -191,9 +200,19 @@ def _row_object(layout: WireLayout) -> tuple[bytes, PointValue]:
     data = flags + octets + TIME_OCTETS[: layout.time.octets]
     if kind in {PointKind.ANALOG_INPUT, PointKind.ANALOG_OUTPUT}:
         return data, AnalogValue(
-            index=ROW_INDEX, value=float(value), quality=quality, timestamp=_expected_timestamp(layout)
+            index=ROW_INDEX,
+            value=float(value),
+            quality=quality,
+            timestamp=_expected_timestamp(layout),
+            timestamp_quality=_expected_quality(layout),
         )
-    return data, CounterValue(index=ROW_INDEX, value=int(value), quality=quality, timestamp=_expected_timestamp(layout))
+    return data, CounterValue(
+        index=ROW_INDEX,
+        value=int(value),
+        quality=quality,
+        timestamp=_expected_timestamp(layout),
+        timestamp_quality=_expected_quality(layout),
+    )
 
 
 _DELIVERED_PAIRS = sorted(pair for pair, layout in LAYOUTS.items() if layout.point_kind in CALLBACK_BY_KIND)
@@ -271,7 +290,8 @@ class TestAnalogOutputValues:
 
         expected_time_1 = EXPECTED_TIME if timed else None
         expected_time_2 = EXPECTED_TIME_2 if timed else None
+        quality = TimestampQuality.SYNCHRONIZED if timed else TimestampQuality.INVALID
         assert values == [
-            AnalogValue(index=9, value=first, quality=0x01, timestamp=expected_time_1),
-            AnalogValue(index=0x42, value=second, quality=0x21, timestamp=expected_time_2),
+            AnalogValue(index=9, value=first, quality=0x01, timestamp=expected_time_1, timestamp_quality=quality),
+            AnalogValue(index=0x42, value=second, quality=0x21, timestamp=expected_time_2, timestamp_quality=quality),
         ]
