@@ -93,6 +93,31 @@ async def main():
 asyncio.run(main())
 ```
 
+### Octet strings (master)
+
+```python
+import asyncio
+from dnp3.master import DefaultSOEHandler, Master, MasterTcpRunner
+
+async def main():
+    handler = DefaultSOEHandler()
+    master = Master(handler=handler)
+
+    async with MasterTcpRunner(master=master, host="localhost", port=20000) as runner:
+        await runner.write_octet_string(2, b"Feeder 7")
+        # Variation 0 asks for strings of any length.
+        await runner.request(master.build_range_poll(group=110, variation=0, start=0, stop=3))
+
+    name = handler.get_octet_string(2)
+    if name is not None:
+        print(name.value.decode("ascii"))
+
+asyncio.run(main())
+```
+
+The master delivers the raw bytes; DNP3 does not define an encoding for them, so decode them as the device documents.
+`write_octet_string()` raises `RequestRejectedError` when the outstation answers that it did not carry out the write.
+
 ## MESA IEEE 1815.2 Outstation
 
 The `dnp3.mesa` module is a DER-oriented outstation built on mesa-tool's
@@ -191,7 +216,9 @@ in detail, with wire-level request/response encoding, in
 
 Wire layout follows IEEE 1815-2012 Annex A. The master additionally decodes
 and delivers Double-Bit Binary Input (groups 3, 4) from a peer that sends it,
-on its own handler callback (`DoubleBitInputHandler`); a few other groups the
+on its own handler callback (`DoubleBitInputHandler`), and Octet String
+(groups 110, 111) on `OctetStringHandler`, and writes one g110 string with
+`MasterTcpRunner.write_octet_string()`; a few other groups the
 wire layout recognizes (command events, frozen analog input, deadband, time)
 are framed but not delivered to any handler.
 

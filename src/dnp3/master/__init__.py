@@ -24,6 +24,7 @@ from dnp3.master.handler import (
     SOEHandler,
 )
 from dnp3.master.master import Master
+from dnp3.master.octet_string import OctetStringHandler, OctetStringValue
 from dnp3.master.polling import (
     ClassPollTask,
     IntegrityPollTask,
@@ -37,6 +38,7 @@ from dnp3.master.tcp_runner import (
     LinkResetPolicy,
     MasterRunnerError,
     MasterTcpRunner,
+    RequestRejectedError,
     ResponseTimeoutError,
     TimeSyncError,
 )
@@ -62,11 +64,14 @@ __all__ = [
     "MasterState",
     "MasterStateManager",
     "MasterTcpRunner",
+    "OctetStringHandler",
+    "OctetStringValue",
     "OperateTask",
     "PollScheduler",
     "PollTask",
     "PollingConfig",
     "RangePollTask",
+    "RequestRejectedError",
     "ResponseHandler",
     "ResponseTimeoutError",
     "SOEHandler",

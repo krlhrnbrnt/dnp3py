@@ -145,6 +145,18 @@ class TimeSyncError(MasterRunnerError):
     """Raised when the outstation does not accept a time synchronization."""
 
 
+class RequestRejectedError(MasterRunnerError):
+    """Raised when the outstation answers that it did not carry out a request.
+
+    Attributes:
+        iin: Internal indications of the response's final fragment.
+    """
+
+    def __init__(self, message: str, iin: IIN) -> None:
+        super().__init__(message)
+        self.iin = iin
+
+
 class _InterruptedError(Exception):
     """Raised inside the runner when a wait gives way to another exchange or a stop."""
 
@@ -596,6 +608,36 @@ class MasterTcpRunner:
 
         write = self.master.build_write_time(DNP3Timestamp(sent_ms), recorded=True)
         _raise_if_rejected("WRITE of g50v3", await self.request(write))
+
+    # -- writes ---------------------------------------------------------------
+
+    async def write_octet_string(self, index: int, value: bytes) -> None:
+        """Write one g110 octet string to the outstation.
+
+        A WRITE response carries no value, so reading the string back to confirm
+        what the outstation stored is the caller's job.
+
+        Raises:
+            ValueError: `index` is outside 0..65535, or `value` is empty or
+                longer than 255 octets. Nothing is sent.
+            RequestRejectedError: The outstation did not carry out the write.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response broke the
+                burst's sequence walk.
+        """
+        request = self.master.build_write_octet_string(index, value)
+        await self._request_accepted(request, f"WRITE of g110v{len(value)} index {index}")
+
+    async def _request_accepted(self, request: RequestFragment, what: str) -> list[ResponseInfo]:
+        """Run `request()`, raising `RequestRejectedError` if the outstation did not carry it out."""
+        responses = await self.request(request)
+        iin = responses[-1].iin
+        rejected = iin & _REJECTED
+        if rejected:
+            msg = f"Outstation rejected {what}: {rejected.name}"
+            raise RequestRejectedError(msg, iin=iin)
+        return responses
 
     # -- unsolicited ----------------------------------------------------------
 

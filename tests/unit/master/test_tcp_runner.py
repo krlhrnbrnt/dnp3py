@@ -46,6 +46,7 @@ from dnp3.master.tcp_runner import (
     LinkResetPolicy,
     MasterRunnerError,
     MasterTcpRunner,
+    RequestRejectedError,
     ResponseTimeoutError,
     TimeSyncError,
 )
@@ -2476,6 +2477,61 @@ class TestTimeSync:
 
         written = TimeAndDateRecorded.from_bytes(written_object(write).data[1:]).timestamp.milliseconds
         assert before <= written <= DNP3Timestamp.now().milliseconds
+
+
+class TestWriteOctetString:
+    """`write_octet_string()` writes one g110 string and checks the outstation carried it out."""
+
+    async def test_accepted_write_returns(self) -> None:
+        """The WRITE carries g110v5 at index 3 with a 1-octet start-stop range."""
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1)
+
+        assert await runner.write_octet_string(3, b"hello") is None
+        [write] = await responder
+
+        assert write[1] == FunctionCode.WRITE
+        block = written_object(write)
+        assert (block.header.group, block.header.variation, block.header.qualifier) == (110, 5, 0x00)
+        assert block.data == bytes([3, 3]) + b"hello"
+
+    @pytest.mark.parametrize("bit", [IIN.NO_FUNC_CODE_SUPPORT, IIN.OBJECT_UNKNOWN, IIN.PARAMETER_ERROR])
+    async def test_rejected_write_raises(self, bit: IIN) -> None:
+        """A WRITE answered with a rejection bit raises, naming the write and the bit."""
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.WRITE: null_reply(bit)})
+
+        with pytest.raises(RequestRejectedError) as excinfo:
+            await runner.write_octet_string(3, b"hello")
+        await responder
+
+        assert "g110v5 index 3" in str(excinfo.value)
+        assert str(bit.name) in str(excinfo.value)
+        assert excinfo.value.iin & bit
+
+    async def test_other_iin_bits_accepted(self) -> None:
+        """IIN bits that do not say the request failed leave the write accepted."""
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.WRITE: null_reply(IIN.DEVICE_RESTART | IIN.CLASS_1_EVENTS)})
+
+        await runner.write_octet_string(3, b"hello")
+        await responder
+
+    async def test_invalid_value_sends_nothing(self) -> None:
+        """An empty string raises before anything reaches the link."""
+        runner, _, channel = await open_runner()
+
+        with pytest.raises(ValueError):
+            await runner.write_octet_string(3, b"")
+
+        await assert_nothing_sent(channel)
+
+    def test_request_rejected_error_exported(self) -> None:
+        """Callers catch the rejection from the package, under the runner's base error."""
+        import dnp3.master
+
+        assert "RequestRejectedError" in dnp3.master.__all__
+        assert issubclass(dnp3.master.RequestRejectedError, MasterRunnerError)
 
 
 class TestStartup:

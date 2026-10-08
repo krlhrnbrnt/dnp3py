@@ -22,7 +22,7 @@ from dnp3.application.builder import (
 from dnp3.application.fragment import ObjectBlock, RequestFragment, ResponseFragment
 from dnp3.application.header import RequestHeader
 from dnp3.application.parser import ParseError, parse_response
-from dnp3.application.qualifiers import CountRange, ObjectHeader, PrefixCode, RangeCode
+from dnp3.application.qualifiers import CountRange, ObjectHeader, PrefixCode, RangeCode, StartStopRange
 from dnp3.core.enums import FunctionCode
 from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.master.commands import (
@@ -47,7 +47,10 @@ from dnp3.master.handler import (
     ResponseInfo,
     SOEHandler,
 )
+from dnp3.master.octet_string import OctetStringValue, deliver_octet_string
 from dnp3.master.polling import (
+    MAX_UINT8_RANGE,
+    MAX_UINT16_RANGE,
     ClassPollTask,
     IntegrityPollTask,
     PollScheduler,
@@ -63,6 +66,9 @@ logger = logging.getLogger(__name__)
 # Quality flag mask
 QUALITY_ONLINE = 0x01
 QUALITY_STATE = 0x80
+
+OCTET_STRING_MAX_LENGTH = 255
+_OCTET_STRING_GROUP = 110
 
 
 # Qualifier field masks (IEEE 1815-2012 Table 4-1).
@@ -436,6 +442,17 @@ def _decode_double_bit(block: ObjectBlock, wire: WireLayout, cto: datetime | Non
     ]
 
 
+def _decode_octet_string(block: ObjectBlock, wire: WireLayout, cto: datetime | None) -> list[OctetStringValue]:
+    """Decode octet strings: each object is `wire.width` raw octets, the block's variation."""
+    slots = _block_slots(block)
+    if slots is None:
+        return []
+    return [
+        OctetStringValue(index=index, value=bytes(block.data[payload : payload + wire.width]))
+        for index, payload in _iter_object_slots(slots, block.data, wire.width)
+    ]
+
+
 class _Timed(Protocol):
     """A decoded value, which may carry a timestamp."""
 
@@ -503,7 +520,8 @@ class _KindBatch(Generic[_V]):
 
 # Point kinds the master decodes, each with the callback its values go to.
 # A kind absent here (commands and command events, frozen analog, deadband, time, class)
-# is framed but not delivered. Double-bit values reach only a handler with that callback.
+# is framed but not delivered. Double-bit values and octet strings reach only a handler
+# with that callback.
 _DELIVERIES: Mapping[PointKind, _Delivery] = MappingProxyType(
     {
         PointKind.BINARY_INPUT: _KindDelivery(_decode_binary, lambda h, v, i: h.on_binary_input(v, i)),
@@ -513,6 +531,7 @@ _DELIVERIES: Mapping[PointKind, _Delivery] = MappingProxyType(
         PointKind.ANALOG_OUTPUT: _KindDelivery(_decode_analog, lambda h, v, i: h.on_analog_output(v, i)),
         PointKind.COUNTER: _KindDelivery(_decode_counter, lambda h, v, i: h.on_counter(v, i)),
         PointKind.FROZEN_COUNTER: _KindDelivery(_decode_counter, lambda h, v, i: h.on_frozen_counter(v, i)),
+        PointKind.OCTET_STRING: _KindDelivery(_decode_octet_string, deliver_octet_string),
     }
 )
 
@@ -794,6 +813,30 @@ class Master:
             range_code=RangeCode.UINT8_COUNT,
         )
         block = ObjectBlock(header=header, data=CountRange(count=1).to_bytes_1() + obj.to_bytes())
+        seq = self._state.get_next_request_sequence()
+        return build_write_request((block,), seq=seq)
+
+    def build_write_octet_string(self, index: int, value: bytes) -> RequestFragment:
+        """Build a WRITE of one g110 octet string at ``index``.
+
+        Raises:
+            ValueError: ``index`` is outside 0..65535, or ``value`` is empty or
+                longer than 255 octets. The g110 variation is the string length,
+                1 to 255, and variation 0 is not a length (IEEE 1815-2012 Annex A).
+        """
+        if not 0 <= index <= MAX_UINT16_RANGE:
+            raise ValueError(f"Octet string index must be 0..{MAX_UINT16_RANGE}, got {index}")
+        if not 1 <= len(value) <= OCTET_STRING_MAX_LENGTH:
+            raise ValueError(f"Octet string must be 1..{OCTET_STRING_MAX_LENGTH} octets, got {len(value)}")
+        point = StartStopRange(start=index, stop=index)
+        if index <= MAX_UINT8_RANGE:
+            range_code, range_data = RangeCode.UINT8_START_STOP, point.to_bytes_1()
+        else:
+            range_code, range_data = RangeCode.UINT16_START_STOP, point.to_bytes_2()
+        header = ObjectHeader.build(
+            group=_OCTET_STRING_GROUP, variation=len(value), prefix=PrefixCode.NONE, range_code=range_code
+        )
+        block = ObjectBlock(header=header, data=range_data + value)
         seq = self._state.get_next_request_sequence()
         return build_write_request((block,), seq=seq)
 

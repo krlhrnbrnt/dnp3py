@@ -8,7 +8,7 @@ from hypothesis import strategies as st
 
 from dnp3.application.builder import build_response
 from dnp3.application.fragment import ObjectBlock
-from dnp3.application.parser import parse_response
+from dnp3.application.parser import parse_request, parse_response
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import ControlCode, FunctionCode
 from dnp3.core.timestamp import DNP3Timestamp
@@ -245,6 +245,55 @@ class TestMasterRequestBuilding:
         assert fragment.to_bytes() == bytes(
             [0xC0 | fragment.sequence, 0x02, 0x32, variation, 0x07, 0x01, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
         )
+
+    def test_build_write_octet_string_uint8_index(self) -> None:
+        """A one-string write is g110v{len}, start-stop range on the index, then the string."""
+        fragment = Master().build_write_octet_string(3, b"abc")
+
+        assert fragment.to_bytes() == bytes(
+            [0xC0 | fragment.sequence, 0x02, 0x6E, 0x03, 0x00, 0x03, 0x03, 0x61, 0x62, 0x63]
+        )
+
+    def test_build_write_octet_string_uint16_index(self) -> None:
+        """An index above 255 takes the 2-octet start-stop qualifier."""
+        fragment = Master().build_write_octet_string(300, b"abc")
+
+        assert fragment.to_bytes()[4:9] == bytes([0x01, 0x2C, 0x01, 0x2C, 0x01])
+
+    @pytest.mark.parametrize(("index", "qualifier"), [(255, 0x00), (256, 0x01), (65535, 0x01)])
+    def test_build_write_octet_string_index_boundaries(self, index: int, qualifier: int) -> None:
+        """The qualifier widens to two octets exactly when the index passes 255."""
+        assert Master().build_write_octet_string(index, b"a").to_bytes()[4] == qualifier
+
+    def test_build_write_octet_string_max_length(self) -> None:
+        """A 255-octet string is variation 255."""
+        assert Master().build_write_octet_string(0, bytes(255)).to_bytes()[3] == 255
+
+    @pytest.mark.parametrize(
+        ("index", "value"),
+        [(0, b""), (0, bytes(256)), (-1, b"a"), (65536, b"a")],
+        ids=["empty", "too-long", "negative-index", "index-too-large"],
+    )
+    def test_build_write_octet_string_rejects(self, index: int, value: bytes) -> None:
+        """An unwritable index or length raises without taking a sequence number."""
+        master = Master()
+        expected = Master().build_write_octet_string(0, b"a").sequence
+
+        with pytest.raises(ValueError):
+            master.build_write_octet_string(index, value)
+
+        assert master.build_write_octet_string(0, b"a").sequence == expected
+
+    @given(index=st.integers(min_value=0, max_value=65535), value=st.binary(min_size=1, max_size=255))
+    def test_build_write_octet_string_round_trips(self, index: int, value: bytes) -> None:
+        """Any writable index and string parse back as one WRITE block of that string."""
+        fragment = parse_request(Master().build_write_octet_string(index, value).to_bytes())
+
+        assert fragment.header.function == FunctionCode.WRITE
+        (block,) = fragment.objects
+        width = 1 if index <= 255 else 2
+        assert (block.header.group, block.header.variation, block.header.qualifier) == (110, len(value), width - 1)
+        assert block.data == index.to_bytes(width, "little") * 2 + value
 
     def test_build_confirm(self) -> None:
         """Test building CONFIRM request."""
