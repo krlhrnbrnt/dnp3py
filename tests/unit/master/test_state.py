@@ -120,7 +120,6 @@ class TestTaskInfo:
         assert task.task_type == "poll"
         assert task.data is None
         assert task.state == TaskState.PENDING
-        assert task.retry_count == 2
         assert task.start_time == 0.0
         assert task.timeout == 5.0
 
@@ -130,14 +129,12 @@ class TestTaskInfo:
             task_id=5,
             task_type="command",
             data={"index": 0},
-            retry_count=3,
             timeout=10.0,
         )
 
         assert task.task_id == 5
         assert task.task_type == "command"
         assert task.data == {"index": 0}
-        assert task.retry_count == 3
         assert task.timeout == 10.0
 
     def test_start(self) -> None:
@@ -206,32 +203,6 @@ class TestTaskInfo:
         with patch("time.monotonic", return_value=1006.0):
             # 6 seconds elapsed, timeout is 5 seconds
             assert task.is_expired() is True
-
-    def test_can_retry_with_retries(self) -> None:
-        """Test can_retry when retries remaining."""
-        task = TaskInfo(task_id=1, task_type="poll", retry_count=2)
-
-        assert task.can_retry() is True
-
-    def test_can_retry_without_retries(self) -> None:
-        """Test can_retry when no retries remaining."""
-        task = TaskInfo(task_id=1, task_type="poll", retry_count=0)
-
-        assert task.can_retry() is False
-
-    def test_decrement_retry(self) -> None:
-        """Test decrementing retry count."""
-        task = TaskInfo(task_id=1, task_type="poll", retry_count=2)
-
-        task.decrement_retry()
-        assert task.retry_count == 1
-
-        task.decrement_retry()
-        assert task.retry_count == 0
-
-        # Should not go negative
-        task.decrement_retry()
-        assert task.retry_count == 0
 
 
 class TestUnsolicitedState:
@@ -394,25 +365,10 @@ class TestMasterStateManager:
         assert result is False
         assert task.state == TaskState.RUNNING
 
-    def test_check_task_timeout_expired_with_retry(self) -> None:
-        """Test timeout check when expired with retries."""
+    def test_expired_task_fails(self) -> None:
+        """An expired task fails and the manager goes idle."""
         manager = MasterStateManager()
-        task = manager.create_task("poll", timeout=5.0, retry_count=2)
-
-        with patch("time.monotonic", return_value=1000.0):
-            manager.start_task(task)
-
-        with patch("time.monotonic", return_value=1006.0):
-            result = manager.check_task_timeout()
-
-        assert result is True
-        assert task.state == TaskState.RUNNING  # Restarted
-        assert task.retry_count == 1
-
-    def test_check_task_timeout_expired_no_retry(self) -> None:
-        """Test timeout check when expired without retries."""
-        manager = MasterStateManager()
-        task = manager.create_task("poll", timeout=5.0, retry_count=0)
+        task = manager.create_task("poll", timeout=5.0)
 
         with patch("time.monotonic", return_value=1000.0):
             manager.start_task(task)
@@ -467,27 +423,20 @@ class TestMasterStateManager:
     @given(
         task_type=st.sampled_from(["poll", "command", "unsolicited"]),
         timeout=st.floats(min_value=0.1, max_value=60.0),
-        retry_count=st.integers(min_value=0, max_value=5),
     )
     @settings(max_examples=50)
     def test_property_based_task_lifecycle(
         self,
         task_type: str,
         timeout: float,
-        retry_count: int,
     ) -> None:
         """Test task lifecycle with various parameters."""
         manager = MasterStateManager()
 
-        task = manager.create_task(
-            task_type,
-            timeout=timeout,
-            retry_count=retry_count,
-        )
+        task = manager.create_task(task_type, timeout=timeout)
 
         assert task.task_type == task_type
         assert task.timeout == timeout
-        assert task.retry_count == retry_count
 
         manager.start_task(task)
         assert manager.is_waiting_response

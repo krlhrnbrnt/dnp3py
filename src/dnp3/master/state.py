@@ -24,7 +24,7 @@ class TaskState(Enum):
     PENDING = auto()  # Not yet started
     RUNNING = auto()  # In progress
     COMPLETED = auto()  # Successfully completed
-    FAILED = auto()  # Failed after retries
+    FAILED = auto()  # Failed or timed out
     CANCELLED = auto()  # Cancelled by user
 
 
@@ -72,7 +72,6 @@ class TaskInfo:
         task_type: Type of task (poll, command, etc.).
         data: Task-specific data.
         state: Current task state.
-        retry_count: Number of retries remaining.
         start_time: When task started.
         timeout: Task timeout in seconds.
     """
@@ -81,7 +80,6 @@ class TaskInfo:
     task_type: str
     data: Any = None
     state: TaskState = TaskState.PENDING
-    retry_count: int = 2
     start_time: float = 0.0
     timeout: float = 5.0
 
@@ -111,19 +109,6 @@ class TaskInfo:
         if self.state != TaskState.RUNNING:
             return False
         return time.monotonic() - self.start_time > self.timeout
-
-    def can_retry(self) -> bool:
-        """Check if task can be retried.
-
-        Returns:
-            True if retries remaining.
-        """
-        return self.retry_count > 0
-
-    def decrement_retry(self) -> None:
-        """Decrement retry count."""
-        if self.retry_count > 0:
-            self.retry_count -= 1
 
 
 @dataclass
@@ -174,7 +159,6 @@ class MasterStateManager:
         self,
         task_type: str,
         data: Any = None,
-        retry_count: int = 2,
         timeout: float = 5.0,
     ) -> TaskInfo:
         """Create a new task.
@@ -182,7 +166,6 @@ class MasterStateManager:
         Args:
             task_type: Type of task.
             data: Task-specific data.
-            retry_count: Number of retries.
             timeout: Task timeout in seconds.
 
         Returns:
@@ -192,7 +175,6 @@ class MasterStateManager:
             task_id=self._next_task_id,
             task_type=task_type,
             data=data,
-            retry_count=retry_count,
             timeout=timeout,
         )
         self._next_task_id += 1
@@ -233,25 +215,15 @@ class MasterStateManager:
         self.state = MasterState.IDLE
 
     def check_task_timeout(self) -> bool:
-        """Check if current task has timed out.
+        """Fail the current task if it has timed out.
 
         Returns:
-            True if task timed out and was handled.
+            True if the task timed out and was failed.
         """
-        if self._current_task is None:
+        if self._current_task is None or not self._current_task.is_expired():
             return False
-        if not self._current_task.is_expired():
-            return False
-
-        # Task timed out
-        if self._current_task.can_retry():
-            self._current_task.decrement_retry()
-            self._current_task.start()  # Restart for retry
-            return True
-        else:
-            self._current_task.fail()
-            self.state = MasterState.IDLE
-            return True
+        self.fail_current_task()
+        return True
 
     def on_unsolicited_received(self, sequence: int) -> None:
         """Handle receipt of unsolicited response.

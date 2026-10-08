@@ -25,8 +25,6 @@ class TestPollingConfig:
         assert config.class_1_poll_interval == 0.0
         assert config.class_2_poll_interval == 0.0
         assert config.class_3_poll_interval == 0.0
-        assert config.response_timeout == 5.0
-        assert config.retry_count == 2
 
     def test_custom_values(self) -> None:
         """Test custom polling configuration."""
@@ -35,16 +33,12 @@ class TestPollingConfig:
             class_1_poll_interval=10.0,
             class_2_poll_interval=30.0,
             class_3_poll_interval=60.0,
-            response_timeout=10.0,
-            retry_count=3,
         )
 
         assert config.integrity_poll_interval == 1800.0
         assert config.class_1_poll_interval == 10.0
         assert config.class_2_poll_interval == 30.0
         assert config.class_3_poll_interval == 60.0
-        assert config.response_timeout == 10.0
-        assert config.retry_count == 3
 
     def test_is_frozen(self) -> None:
         """Test that PollingConfig is frozen."""
@@ -91,7 +85,6 @@ class TestMasterConfig:
         assert config.max_fragment_size == 2048
         assert config.response_timeout == 5.0
         assert config.confirm_timeout == 5.0
-        assert config.task_retry_count == 2
         assert config.enable_unsolicited is True
         assert config.startup_integrity_poll is True
         assert config.disable_unsolicited_on_startup is False
@@ -109,7 +102,6 @@ class TestMasterConfig:
             max_fragment_size=1024,
             response_timeout=10.0,
             confirm_timeout=8.0,
-            task_retry_count=3,
             enable_unsolicited=False,
             startup_integrity_poll=False,
             polling=polling,
@@ -120,7 +112,6 @@ class TestMasterConfig:
         assert config.max_fragment_size == 1024
         assert config.response_timeout == 10.0
         assert config.confirm_timeout == 8.0
-        assert config.task_retry_count == 3
         assert config.enable_unsolicited is False
         assert config.startup_integrity_poll is False
         assert config.polling.integrity_poll_interval == 1800.0
@@ -165,10 +156,14 @@ class TestMasterConfig:
         with pytest.raises(ValueError, match="Confirm timeout must be"):
             MasterConfig(confirm_timeout=0)
 
-    def test_invalid_task_retry_count_negative(self) -> None:
-        """Test that negative retry count raises error."""
-        with pytest.raises(ValueError, match="Task retry count must be"):
-            MasterConfig(task_retry_count=-1)
+    def test_removed_retry_fields_rejected(self) -> None:
+        """PollingConfig and MasterConfig reject retry and polling-timeout keywords."""
+        with pytest.raises(TypeError):
+            PollingConfig(retry_count=1)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            PollingConfig(response_timeout=1.0)  # type: ignore[call-arg]
+        with pytest.raises(TypeError):
+            MasterConfig(task_retry_count=1)  # type: ignore[call-arg]
 
     def test_valid_boundary_addresses(self) -> None:
         """Test valid boundary addresses."""
@@ -195,24 +190,20 @@ class TestMasterConfig:
         address=st.integers(min_value=0, max_value=MAX_MASTER_ADDRESS),
         outstation_addr=st.integers(min_value=0, max_value=MAX_OUTSTATION_ADDRESS),
         timeout=st.floats(min_value=0.1, max_value=120.0),
-        retries=st.integers(min_value=0, max_value=10),
     )
     def test_property_based_valid_config(
         self,
         address: int,
         outstation_addr: int,
         timeout: float,
-        retries: int,
     ) -> None:
         """Test master config with various valid values."""
         config = MasterConfig(
             address=address,
             outstation_address=outstation_addr,
             response_timeout=timeout,
-            task_retry_count=retries,
         )
 
         assert config.address == address
         assert config.outstation_address == outstation_addr
         assert config.response_timeout == timeout
-        assert config.task_retry_count == retries

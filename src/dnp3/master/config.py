@@ -35,16 +35,12 @@ class PollingConfig:
         class_1_poll_interval: Seconds between Class 1 polls (0=disabled).
         class_2_poll_interval: Seconds between Class 2 polls (0=disabled).
         class_3_poll_interval: Seconds between Class 3 polls (0=disabled).
-        response_timeout: Timeout waiting for response (seconds).
-        retry_count: Number of retries on timeout.
     """
 
     integrity_poll_interval: float = 3600.0  # 1 hour
     class_1_poll_interval: float = 0.0  # Disabled
     class_2_poll_interval: float = 0.0  # Disabled
     class_3_poll_interval: float = 0.0  # Disabled
-    response_timeout: float = 5.0
-    retry_count: int = 2
 
 
 @dataclass(frozen=True)
@@ -57,7 +53,6 @@ class MasterConfig:
         max_fragment_size: Maximum fragment size in bytes.
         response_timeout: Timeout waiting for responses (seconds).
         confirm_timeout: Timeout waiting for confirmations (seconds).
-        task_retry_count: Number of retries for failed tasks.
         enable_unsolicited: Accept unsolicited responses.
         startup_integrity_poll: Perform integrity poll on startup.
         disable_unsolicited_on_startup: Send DISABLE_UNSOLICITED on startup.
@@ -72,7 +67,6 @@ class MasterConfig:
     max_fragment_size: int = 2048
     response_timeout: float = 5.0
     confirm_timeout: float = 5.0
-    task_retry_count: int = 2
     enable_unsolicited: bool = True
     startup_integrity_poll: bool = True
     disable_unsolicited_on_startup: bool = False
@@ -98,7 +92,4 @@ class MasterConfig:
             raise ValueError(msg)
         if self.confirm_timeout <= 0:
             msg = f"Confirm timeout must be > 0, got {self.confirm_timeout}"
-            raise ValueError(msg)
-        if self.task_retry_count < 0:
-            msg = f"Task retry count must be >= 0, got {self.task_retry_count}"
             raise ValueError(msg)

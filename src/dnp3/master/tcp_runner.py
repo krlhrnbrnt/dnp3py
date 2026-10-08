@@ -175,7 +175,8 @@ class MasterTcpRunner:
             response parsing, and the SOE handler values are reported to.
         host: Outstation host to connect to.
         port: Outstation TCP port.
-        response_timeout: Seconds to wait for a response fragment.
+        response_timeout: Seconds to wait for a response. None uses the
+            master's `MasterConfig.response_timeout`.
         link_reset: Whether to reset the data link on open.
         channel: Channel to use instead of opening a TCP client. Supplied by
             tests to exercise the stack without a socket.
@@ -188,7 +189,7 @@ class MasterTcpRunner:
     master: Master
     host: str = "127.0.0.1"
     port: int = 20000
-    response_timeout: float = 10.0
+    response_timeout: float | None = None
     link_reset: LinkResetPolicy = LinkResetPolicy.ON_OPEN
     channel: Channel | None = None
     poll_retry_delay: float = 5.0
@@ -1175,7 +1176,9 @@ class MasterTcpRunner:
         Returns:
             Event-loop time of the deadline.
         """
-        return asyncio.get_running_loop().time() + (self.response_timeout if timeout is None else timeout)
+        if timeout is None:
+            timeout = self.master.config.response_timeout if self.response_timeout is None else self.response_timeout
+        return asyncio.get_running_loop().time() + timeout
 
     @contextlib.asynccontextmanager
     async def _claim(self) -> AsyncIterator[None]:

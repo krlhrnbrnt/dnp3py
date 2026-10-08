@@ -843,6 +843,43 @@ class TestTimeouts:
             await runner.integrity_poll()
         await responder
 
+    @staticmethod
+    async def _silent_runner(config_timeout: float, **runner_options: Any) -> MasterTcpRunner:
+        """Open a runner whose peer never answers."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        master = Master(
+            config=MasterConfig(
+                address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR, response_timeout=config_timeout
+            ),
+            handler=RecordingHandler(),
+        )
+        runner = MasterTcpRunner(
+            master=master,
+            channel=channel_a,
+            link_reset=LinkResetPolicy.NEVER,
+            **runner_options,
+        )
+        await runner.open()
+        return runner
+
+    async def test_timeout_defaults_to_master_config(self) -> None:
+        """Without its own timeout, the runner waits `MasterConfig.response_timeout`."""
+        runner = await self._silent_runner(0.2)
+
+        async with asyncio.timeout(1):
+            with pytest.raises(ResponseTimeoutError):
+                await runner.integrity_poll()
+
+    async def test_runner_timeout_overrides_config(self) -> None:
+        """A timeout given to the runner wins over `MasterConfig.response_timeout`."""
+        runner = await self._silent_runner(30, response_timeout=0.2)
+
+        async with asyncio.timeout(1):
+            with pytest.raises(ResponseTimeoutError):
+                await runner.integrity_poll()
+
 
 class TestRequestVariants:
     """Request builders that wrap `request()`."""
