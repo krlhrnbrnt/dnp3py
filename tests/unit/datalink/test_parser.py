@@ -1,8 +1,26 @@
 """Tests for data link frame parser."""
 
+from itertools import pairwise
+
+from hypothesis import given
+from hypothesis import strategies as st
+
 from dnp3.datalink.control import ControlByte
-from dnp3.datalink.frame import DataLinkFrame
+from dnp3.datalink.frame import START_BYTES, DataLinkFrame, DataLinkHeader
 from dnp3.datalink.parser import FrameParser
+
+
+def _good_frame(user_data: bytes) -> DataLinkFrame:
+    return DataLinkFrame.build(
+        destination=1,
+        source=2,
+        control=ControlByte.from_int(0xC4),
+        user_data=user_data,
+    )
+
+
+def _header_with_length(length: int) -> bytes:
+    return DataLinkHeader(length, ControlByte.from_int(0xC4), 1, 2).to_bytes()
 
 
 class TestFrameParserBasic:
@@ -221,3 +239,21 @@ class TestFrameParserErrors:
         # Should skip the corrupted frame and parse the second one
         assert len(frames) == 1
         assert frames[0].user_data == b"also good"
+
+    _stream_pieces = st.one_of(
+        st.binary(max_size=512),
+        st.integers(1, 2048).map(lambda n: START_BYTES * n),
+        st.binary(max_size=250).map(lambda d: _good_frame(d).to_bytes()),
+        st.integers(0, 255).map(_header_with_length),
+    )
+
+    @given(st.lists(_stream_pieces, max_size=8), st.lists(st.integers(0, 16384), max_size=8))
+    def test_feed_never_raises(self, pieces: list[bytes], cuts: list[int]) -> None:
+        """Mixed garbage, valid frames and bogus headers never raise and only yield well-formed frames."""
+        stream = b"".join(pieces)
+        bounds = [0, *sorted(c % (len(stream) + 1) for c in cuts), len(stream)]
+        parser = FrameParser()
+        for start, end in pairwise(bounds):
+            for frame in parser.feed(stream[start:end]):
+                assert frame.header.length >= 5
+                assert len(frame.user_data) == frame.header.user_data_length

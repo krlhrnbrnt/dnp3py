@@ -1,5 +1,8 @@
 """Tests for the Master class."""
 
+from hypothesis import given
+from hypothesis import strategies as st
+
 from dnp3.application.fragment import ObjectBlock
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import ControlCode, FunctionCode
@@ -13,6 +16,7 @@ from dnp3.master.commands import (
 from dnp3.master.config import MasterConfig, PollingConfig
 from dnp3.master.handler import (
     DefaultSOEHandler,
+    ResponseInfo,
 )
 from dnp3.master.master import (
     QUALITY_ONLINE,
@@ -561,3 +565,19 @@ class TestMasterSelectStoring:
         master.build_select(task2)
 
         assert master._pending_select is task2
+
+
+class TestProcessResponse:
+    """process_response is total over arbitrary bytes."""
+
+    @given(
+        st.one_of(
+            st.binary(max_size=300),
+            st.binary(max_size=296).map(lambda body: b"\xc0\x81\x00\x00" + body),
+        )
+    )
+    def test_process_response_total(self, data: bytes) -> None:
+        """Any bytes give a ResponseInfo or None, never an exception."""
+        info = Master().process_response(data)
+
+        assert info is None or isinstance(info, ResponseInfo)
