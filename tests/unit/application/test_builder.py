@@ -19,6 +19,7 @@ from dnp3.application.builder import (
     build_operate_request,
     build_range_request,
     build_read_request,
+    build_record_current_time_request,
     build_response,
     build_select_request,
     build_unsolicited_response,
@@ -322,6 +323,15 @@ class TestBuildDelayMeasureRequest:
         fragment = build_delay_measure_request()
         assert fragment.header.function == FunctionCode.DELAY_MEASURE
         assert len(fragment.objects) == 0
+
+
+class TestBuildRecordCurrentTimeRequest:
+    """Tests for build_record_current_time_request function."""
+
+    def test_record_current_time(self) -> None:
+        """Build RECORD_CURRENT_TIME request."""
+        fragment = build_record_current_time_request(seq=7)
+        assert fragment.to_bytes() == bytes([0xC7, FunctionCode.RECORD_CURRENT_TIME])
 
 
 class TestBuildRestartRequests:

@@ -14,15 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import struct
 import time
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
-from dnp3.application.builder import build_response
+from dnp3.application.builder import build_null_response, build_response
 from dnp3.application.fragment import ObjectBlock, Truncation, TruncationReason
+from dnp3.application.parser import parse_request
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import FunctionCode, LinkFunctionCode
+from dnp3.core.flags import IIN
+from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.datalink.builder import (
     build_ack,
     build_primary_frame,
@@ -30,7 +36,7 @@ from dnp3.datalink.builder import (
 )
 from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
-from dnp3.master.config import MasterConfig
+from dnp3.master.config import MasterConfig, TimeSyncMethod
 from dnp3.master.handler import ResponseInfo
 from dnp3.master.master import Master
 from dnp3.master.polling import IntegrityPollTask
@@ -40,7 +46,9 @@ from dnp3.master.tcp_runner import (
     MasterRunnerError,
     MasterTcpRunner,
     ResponseTimeoutError,
+    TimeSyncError,
 )
+from dnp3.objects.time import TimeAndDate, TimeAndDateRecorded
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport_io.channel import ChannelError
 from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
@@ -232,11 +240,15 @@ def make_runner(
     link_reset: LinkResetPolicy = LinkResetPolicy.NEVER,
     response_timeout: float = 2.0,
     poll_retry_delay: float = 5.0,
+    **config_options: Any,
 ) -> tuple[MasterTcpRunner, RecordingHandler]:
-    """Build a runner over a supplied channel, with a recording handler."""
+    """Build a runner over a supplied channel, with a recording handler.
+
+    `config_options` are passed on to `MasterConfig`.
+    """
     handler = RecordingHandler()
     master = Master(
-        config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR),
+        config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR, **config_options),
         handler=handler,
     )
     runner = MasterTcpRunner(
@@ -2220,3 +2232,277 @@ class TestTruncatedFragments:
         assert handler.analog_inputs == {}
         confirms = await peer.read_fragments(1, timeout=0.5)
         assert confirms == [bytes([0xC0 | seq_holder[0], FunctionCode.CONFIRM.value])]
+
+
+def time_delay_response(*, seq: int, delay_ms: int) -> bytes:
+    """A DELAY_MEASURE answer: one g52v2 object, count-qualified."""
+    header = ObjectHeader(group=52, variation=2, qualifier=0x07)
+    block = ObjectBlock(header=header, data=bytes([0x01]) + delay_ms.to_bytes(2, "little"))
+    return build_response(objects=(block,), seq=seq).to_bytes()
+
+
+Reply = Callable[[int], bytes]
+"""Builds the answer to a request from the request's sequence."""
+
+
+def null_reply(iin: IIN | None = None) -> Reply:
+    return lambda seq: build_null_response(iin=iin, seq=seq).to_bytes()
+
+
+def delay_reply(delay_ms: int) -> Reply:
+    return lambda seq: time_delay_response(seq=seq, delay_ms=delay_ms)
+
+
+def answer_requests(
+    peer: FakeOutstation,
+    count: int,
+    replies: dict[FunctionCode, Reply] | None = None,
+) -> asyncio.Task[list[bytes]]:
+    """Answer `count` requests in turn, collecting them in a background task.
+
+    DELAY_MEASURE gets a zero turnaround and anything else a null response,
+    unless `replies` gives an answer for its function code.
+    """
+    defaults = {FunctionCode.DELAY_MEASURE: delay_reply(0)}
+    replies = defaults | (replies or {})
+
+    async def serve() -> list[bytes]:
+        received: list[bytes] = []
+        for _ in range(count):
+            [request] = await peer.read_fragments(1)
+            received.append(request)
+            reply = replies.get(FunctionCode(request[1]), null_reply())
+            await peer.send_fragment(reply(request[0] & 0x0F))
+        return received
+
+    return asyncio.create_task(serve())
+
+
+def written_object(request: bytes) -> ObjectBlock:
+    """The single object block of a WRITE request."""
+    [block] = parse_request(request).objects
+    return block
+
+
+async def assert_nothing_sent(channel: object) -> None:
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(channel.read(4096), timeout=0.2)  # type: ignore[attr-defined]
+
+
+async def open_runner(**config_options: Any) -> tuple[MasterTcpRunner, FakeOutstation, object]:
+    """An opened runner, the fake outstation facing it, and the outstation's channel end."""
+    channel_a, channel_b = create_channel_pair()
+    await channel_a.open()
+    await channel_b.open()
+    runner, _ = make_runner(channel_a, **config_options)
+    await runner.open()
+    return runner, FakeOutstation(channel_b), channel_b
+
+
+class TestTimeSync:
+    """`time_sync()` runs the non-LAN or LAN procedure against the outstation."""
+
+    async def test_non_lan_writes_corrected_time(self) -> None:
+        """The WRITE carries the clock at write time plus the one-way delay.
+
+        Round trip 300 ms less a 100 ms turnaround leaves a 100 ms one-way
+        delay. The clock reads 10_400 when the WRITE is built, so the outstation
+        is set to 10_500.
+        """
+        runner, peer, _ = await open_runner()
+        runner.wall_clock_ms = iter([10_000, 10_300, 10_400]).__next__
+        responder = answer_requests(peer, 2, {FunctionCode.DELAY_MEASURE: delay_reply(100)})
+
+        await runner.time_sync(TimeSyncMethod.NON_LAN)
+        delay_measure, write = await responder
+
+        assert delay_measure[1] == FunctionCode.DELAY_MEASURE
+        assert write[1] == FunctionCode.WRITE
+        block = written_object(write)
+        assert (block.header.group, block.header.variation, block.header.qualifier) == (50, 1, 0x07)
+        assert block.data[0] == 1
+        assert TimeAndDate.from_bytes(block.data[1:]).timestamp.milliseconds == 10_500
+
+    async def test_lan_writes_recorded_time(self) -> None:
+        """The WRITE carries the clock reading taken before RECORD_CURRENT_TIME."""
+        runner, peer, _ = await open_runner()
+        runner.wall_clock_ms = iter([20_000]).__next__
+        responder = answer_requests(peer, 2)
+
+        await runner.time_sync(TimeSyncMethod.LAN)
+        record, write = await responder
+
+        assert record[1] == FunctionCode.RECORD_CURRENT_TIME
+        assert write[1] == FunctionCode.WRITE
+        block = written_object(write)
+        assert (block.header.group, block.header.variation, block.header.qualifier) == (50, 3, 0x07)
+        assert block.data[0] == 1
+        assert TimeAndDateRecorded.from_bytes(block.data[1:]).timestamp.milliseconds == 20_000
+
+    async def test_lan_unsupported_raises_with_hint(self) -> None:
+        """An outstation without RECORD_CURRENT_TIME is pointed at the non-LAN procedure."""
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.RECORD_CURRENT_TIME: null_reply(IIN.NO_FUNC_CODE_SUPPORT)})
+
+        with pytest.raises(TimeSyncError, match=r"MasterConfig\.time_sync_method.*TimeSyncMethod\.NON_LAN"):
+            await runner.time_sync(TimeSyncMethod.LAN)
+        await responder
+
+        await assert_nothing_sent(channel)
+
+    async def test_write_rejected_raises(self) -> None:
+        """A WRITE answered with PARAMETER_ERROR is a failed sync."""
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 2, {FunctionCode.WRITE: null_reply(IIN.PARAMETER_ERROR)})
+
+        with pytest.raises(TimeSyncError, match="PARAMETER_ERROR"):
+            await runner.time_sync(TimeSyncMethod.NON_LAN)
+        await responder
+
+    async def test_delay_measure_rejected_raises(self) -> None:
+        """A rejected DELAY_MEASURE is a failed sync, and no WRITE follows."""
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.DELAY_MEASURE: null_reply(IIN.NO_FUNC_CODE_SUPPORT)})
+
+        with pytest.raises(TimeSyncError, match="NO_FUNC_CODE_SUPPORT"):
+            await runner.time_sync(TimeSyncMethod.NON_LAN)
+        await responder
+
+        await assert_nothing_sent(channel)
+
+    async def test_missing_time_delay_raises(self) -> None:
+        """A DELAY_MEASURE answer without g52 leaves nothing to correct by, so no WRITE is sent."""
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.DELAY_MEASURE: null_reply()})
+
+        with pytest.raises(TimeSyncError, match="g52"):
+            await runner.time_sync(TimeSyncMethod.NON_LAN)
+        await responder
+
+        await assert_nothing_sent(channel)
+
+    async def test_method_defaults_to_config(self) -> None:
+        """With no argument the configured method is used."""
+        runner, peer, _ = await open_runner(time_sync_method=TimeSyncMethod.NON_LAN)
+        responder = answer_requests(peer, 2)
+
+        await runner.time_sync()
+        first, _ = await responder
+
+        assert first[1] == FunctionCode.DELAY_MEASURE
+
+    @pytest.mark.parametrize("method", list(TimeSyncMethod))
+    async def test_clock_read_once_the_channel_is_held(self, method: TimeSyncMethod) -> None:
+        """Waiting behind another exchange does not skew the time written.
+
+        The clock moves from 1_000 to 5_000 while a poll holds the channel.
+        Readings taken before the wait would write 1_000 (LAN) or 7_000
+        (non-LAN, the wait counted as round trip).
+        """
+        runner, peer, _ = await open_runner()
+        now = [1_000]
+        runner.wall_clock_ms = lambda: now[0]
+
+        poll = asyncio.create_task(runner.integrity_poll())
+        [poll_request] = await peer.read_fragments(1)
+        sync = asyncio.create_task(runner.time_sync(method))
+        await asyncio.sleep(0.05)
+        now[0] = 5_000
+        await peer.send_fragment(null_reply()(poll_request[0] & 0x0F))
+        await poll
+        responder = answer_requests(peer, 2)
+        await sync
+        _, write = await responder
+
+        assert TimeAndDate.from_bytes(written_object(write).data[1:]).timestamp.milliseconds == 5_000
+
+    async def test_default_clock_is_wall_time(self) -> None:
+        """Without a replacement clock the WRITE carries the current time."""
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 2)
+        before = DNP3Timestamp.now().milliseconds
+
+        await runner.time_sync(TimeSyncMethod.LAN)
+        _, write = await responder
+
+        written = TimeAndDateRecorded.from_bytes(written_object(write).data[1:]).timestamp.milliseconds
+        assert before <= written <= DNP3Timestamp.now().milliseconds
+
+
+class TestStartup:
+    """`startup()` sends what the `MasterConfig` startup flags ask for, in order."""
+
+    async def test_startup_default_flags(self) -> None:
+        """By default: an integrity poll, then ENABLE_UNSOLICITED."""
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 2)
+
+        await runner.startup()
+        requests = await responder
+
+        assert [FunctionCode(r[1]) for r in requests] == [FunctionCode.READ, FunctionCode.ENABLE_UNSOLICITED]
+        await assert_nothing_sent(channel)
+
+    async def test_startup_all_flags(self) -> None:
+        """Unsolicited reporting is off while the clock is set and the poll runs."""
+        runner, peer, channel = await open_runner(
+            disable_unsolicited_on_startup=True,
+            time_sync_on_startup=True,
+            startup_integrity_poll=True,
+            enable_unsolicited_on_startup=True,
+        )
+        responder = answer_requests(peer, 5)
+
+        await runner.startup()
+        requests = await responder
+
+        assert [FunctionCode(r[1]) for r in requests] == [
+            FunctionCode.DISABLE_UNSOLICITED,
+            FunctionCode.RECORD_CURRENT_TIME,
+            FunctionCode.WRITE,
+            FunctionCode.READ,
+            FunctionCode.ENABLE_UNSOLICITED,
+        ]
+        await assert_nothing_sent(channel)
+
+    @pytest.mark.parametrize(
+        ("flag", "function"),
+        [
+            ("disable_unsolicited_on_startup", FunctionCode.DISABLE_UNSOLICITED),
+            ("enable_unsolicited_on_startup", FunctionCode.ENABLE_UNSOLICITED),
+        ],
+    )
+    async def test_rejected_unsolicited_control_is_logged(
+        self,
+        flag: str,
+        function: FunctionCode,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An outstation without unsolicited reporting does not fail startup, but it is logged."""
+        options = {
+            "disable_unsolicited_on_startup": False,
+            "startup_integrity_poll": False,
+            "enable_unsolicited_on_startup": False,
+        }
+        runner, peer, _ = await open_runner(**(options | {flag: True}))
+        responder = answer_requests(peer, 1, {function: null_reply(IIN.NO_FUNC_CODE_SUPPORT)})
+
+        with caplog.at_level(logging.WARNING, logger="dnp3.master.tcp_runner"):
+            await runner.startup()
+        await responder
+
+        [record] = caplog.records
+        assert function.name in record.getMessage()
+        assert "NO_FUNC_CODE_SUPPORT" in record.getMessage()
+
+    async def test_startup_no_flags_sends_nothing(self) -> None:
+        runner, _, channel = await open_runner(
+            disable_unsolicited_on_startup=False,
+            time_sync_on_startup=False,
+            startup_integrity_poll=False,
+            enable_unsolicited_on_startup=False,
+        )
+
+        await runner.startup()
+
+        await assert_nothing_sent(channel)

@@ -52,6 +52,7 @@ from dnp3.objects import (
     FrozenCounter32,
     FrozenCounter32Time,
     TimeAndDate,
+    TimeAndDateRecorded,
     TimeCTO,
     TimeCTOUnsync,
     TimeDelayCoarse,
@@ -562,6 +563,9 @@ _GOLDEN: dict[type[DNP3Object], _Contract] = {
         "Analog input event double with time requires 15 bytes",
     ),
     TimeAndDate: _Contract({"SIZE": 6}, TimeAndDate(_TS), "7b68e5cf8b01", "Time and date requires 6 bytes, got 0"),
+    TimeAndDateRecorded: _Contract(
+        {"SIZE": 6}, TimeAndDateRecorded(_TS), "7b68e5cf8b01", "Recorded time and date requires 6 bytes, got 0"
+    ),
     TimeCTO: _Contract({"SIZE": 6}, TimeCTO(_TS), "7b68e5cf8b01", "Time CTO requires 6 bytes, got 0"),
     TimeCTOUnsync: _Contract(
         {"SIZE": 6}, TimeCTOUnsync(_TS), "7b68e5cf8b01", "Unsync time CTO requires 6 bytes, got 0"

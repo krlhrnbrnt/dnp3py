@@ -5,11 +5,25 @@ and polling settings.
 """
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 
 # DNP3 address limits (IEEE 1815-2012)
 MAX_MASTER_ADDRESS = 65519  # 0xFFEF - addresses 0xFFF0-0xFFFF reserved
 MAX_OUTSTATION_ADDRESS = 65535  # 0xFFFF - can be any 16-bit value
 MIN_FRAGMENT_SIZE = 249  # Minimum required by spec
+
+
+class TimeSyncMethod(Enum):
+    """Time synchronization procedure of IEEE 1815-2012.
+
+    LAN suits networked links, where transmission delay is small and variable;
+    the outstation corrects by the time elapsed since it received
+    RECORD_CURRENT_TIME. NON_LAN measures the link delay with DELAY_MEASURE
+    and corrects by it, which suits serial links, where it is fixed.
+    """
+
+    LAN = auto()
+    NON_LAN = auto()
 
 
 @dataclass(frozen=True)
@@ -49,6 +63,7 @@ class MasterConfig:
         disable_unsolicited_on_startup: Send DISABLE_UNSOLICITED on startup.
         enable_unsolicited_on_startup: Send ENABLE_UNSOLICITED on startup.
         time_sync_on_startup: Perform time sync on startup.
+        time_sync_method: Procedure `time_sync()` uses when not given one.
         polling: Polling configuration.
     """
 
@@ -63,6 +78,7 @@ class MasterConfig:
     disable_unsolicited_on_startup: bool = False
     enable_unsolicited_on_startup: bool = True
     time_sync_on_startup: bool = False
+    time_sync_method: TimeSyncMethod = TimeSyncMethod.LAN
     polling: PollingConfig = field(default_factory=PollingConfig)
 
     def __post_init__(self) -> None:

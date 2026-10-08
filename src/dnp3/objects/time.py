@@ -2,6 +2,7 @@
 
 Group 50: Time and Date
 - Variation 1: Absolute time (6 bytes)
+- Variation 3: Absolute time at last recorded time (6 bytes)
 - Variation 4: Indexed absolute time
 
 Group 51: Time and Date CTO (Common Time of Occurrence)
@@ -43,6 +44,28 @@ class TimeAndDate(FixedSizeObject, StaticObject):
     VARIATION = 1
     FORMAT = "<6s"
     _LABEL = "Time and date"
+
+    timestamp: DNP3Timestamp
+
+
+@register
+@dataclass(frozen=True, slots=True)
+class TimeAndDateRecorded(FixedSizeObject, StaticObject):
+    """Time and Date at Last Recorded Time (g50v3).
+
+    6 bytes: 48-bit milliseconds since epoch. In the LAN time synchronization
+    procedure the master writes the time at which it sent RECORD_CURRENT_TIME,
+    and the outstation corrects its clock by the time elapsed since it recorded
+    that request's arrival.
+
+    Attributes:
+        timestamp: Master time when RECORD_CURRENT_TIME was sent.
+    """
+
+    GROUP = TIME_AND_DATE_GROUP
+    VARIATION = 3
+    FORMAT = "<6s"
+    _LABEL = "Recorded time and date"
 
     timestamp: DNP3Timestamp
 

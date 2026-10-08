@@ -10,6 +10,7 @@ from dnp3.master.config import (
     MIN_FRAGMENT_SIZE,
     MasterConfig,
     PollingConfig,
+    TimeSyncMethod,
 )
 
 
@@ -96,6 +97,7 @@ class TestMasterConfig:
         assert config.disable_unsolicited_on_startup is False
         assert config.enable_unsolicited_on_startup is True
         assert config.time_sync_on_startup is False
+        assert config.time_sync_method is TimeSyncMethod.LAN
         assert isinstance(config.polling, PollingConfig)
 
     def test_custom_values(self) -> None:

@@ -32,7 +32,7 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -40,11 +40,14 @@ from dnp3.application.fragment import RequestFragment
 from dnp3.application.header import MAX_APP_SEQUENCE
 from dnp3.application.parser import ParseError, parse_response_header
 from dnp3.core.enums import LinkFunctionCode
+from dnp3.core.flags import IIN
+from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.datalink.builder import build_ack, build_link_status, build_reset_link_state, build_unconfirmed_user_data
 from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
+from dnp3.master.config import TimeSyncMethod
 from dnp3.master.handler import ResponseInfo
-from dnp3.master.master import Master
+from dnp3.master.master import Master, propagation_delay_ms
 from dnp3.master.polling import PollTask
 from dnp3.transport.reassembler import Reassembler, ReassemblyError
 from dnp3.transport.segment import TransportSegment
@@ -111,6 +114,14 @@ class LinkResetPolicy(Enum):
     NEVER = auto()
 
 
+_REJECTED = IIN.NO_FUNC_CODE_SUPPORT | IIN.OBJECT_UNKNOWN | IIN.PARAMETER_ERROR
+"""IIN2 bits an outstation sets when it did not carry out a request."""
+
+
+def _wall_clock_ms() -> int:
+    return DNP3Timestamp.now().milliseconds
+
+
 class MasterRunnerError(Exception):
     """Raised when the runner cannot complete an exchange."""
 
@@ -126,6 +137,10 @@ class LinkError(MasterRunnerError):
     `ReassemblyError`) so a caller can catch everything this runner raises
     under `MasterRunnerError` without importing from those packages.
     """
+
+
+class TimeSyncError(MasterRunnerError):
+    """Raised when the outstation does not accept a time synchronization."""
 
 
 class _InterruptedError(Exception):
@@ -162,6 +177,8 @@ class MasterTcpRunner:
             tests to exercise the stack without a socket.
         poll_retry_delay: Seconds `run_polls()` waits before retrying a
             scheduled poll that timed out or broke its sequence walk.
+        wall_clock_ms: Master clock, in milliseconds since the Unix epoch, that
+            `time_sync()` sets the outstation to. Defaults to the system clock.
     """
 
     master: Master
@@ -171,6 +188,7 @@ class MasterTcpRunner:
     link_reset: LinkResetPolicy = LinkResetPolicy.ON_OPEN
     channel: Channel | None = None
     poll_retry_delay: float = 5.0
+    wall_clock_ms: Callable[[], int] = _wall_clock_ms
 
     _parser: FrameParser = field(default_factory=FrameParser, init=False, repr=False)
     _segmenter: Segmenter = field(default_factory=Segmenter, init=False, repr=False)
@@ -269,6 +287,40 @@ class MasterTcpRunner:
         await self.close()
 
     # -- requests -------------------------------------------------------------
+
+    async def startup(self) -> None:
+        """Run the startup sequence the `MasterConfig` flags describe.
+
+        In this order, each step only if its flag is set:
+
+        1. `disable_unsolicited_on_startup`: DISABLE_UNSOLICITED for classes 1-3,
+           so no event report arrives before the integrity poll has read
+           current values.
+        2. `time_sync_on_startup`: `time_sync()` with the configured method.
+        3. `startup_integrity_poll`: `integrity_poll()`.
+        4. `enable_unsolicited_on_startup`: ENABLE_UNSOLICITED for classes 1-3.
+
+        An outstation without unsolicited reporting rejects steps 1 and 4;
+        that is logged, not raised. Any other failure raises and skips the
+        remaining steps, which leaves unsolicited reporting disabled if step 1
+        ran. Calling `startup()` again repeats the whole sequence.
+
+        Raises:
+            TimeSyncError: The outstation rejected the time synchronization.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response broke the
+                burst's sequence walk.
+        """
+        config = self.master.config
+        if config.disable_unsolicited_on_startup:
+            _warn_if_rejected("DISABLE_UNSOLICITED", await self.disable_unsolicited())
+        if config.time_sync_on_startup:
+            await self.time_sync()
+        if config.startup_integrity_poll:
+            await self.integrity_poll()
+        if config.enable_unsolicited_on_startup:
+            _warn_if_rejected("ENABLE_UNSOLICITED", await self.enable_unsolicited())
 
     async def integrity_poll(self) -> list[ResponseInfo]:
         """READ Class 0/1/2/3 and report every value to the SOE handler.
@@ -400,6 +452,77 @@ class MasterTcpRunner:
                 ),
                 deadline,
             )
+
+    # -- time synchronization -------------------------------------------------
+
+    async def time_sync(self, method: TimeSyncMethod | None = None) -> None:
+        """Set the outstation's clock to `wall_clock_ms`.
+
+        Runs one of the time synchronization procedures of IEEE 1815-2012:
+
+        - `TimeSyncMethod.NON_LAN`: DELAY_MEASURE, whose round trip less the
+          outstation's reported turnaround gives twice the one-way link delay,
+          then a WRITE of g50v1 carrying the master's time plus that delay.
+        - `TimeSyncMethod.LAN`: RECORD_CURRENT_TIME, on whose arrival the
+          outstation notes its own time, then a WRITE of g50v3 carrying the
+          master's time when it was sent. The outstation adds the time elapsed
+          since.
+
+        The two requests are separate exchanges, so another task's request or
+        a poll from `run_polls()` can run between them. Neither procedure
+        depends on that gap, and each clock reading is taken once the channel
+        is held, so waiting for another exchange does not skew the result.
+
+        Args:
+            method: Procedure to run. None runs `MasterConfig.time_sync_method`.
+
+        Raises:
+            TimeSyncError: The outstation rejected a request, or its
+                DELAY_MEASURE response carried no time delay.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response broke the
+                burst's sequence walk.
+        """
+        self._require_open()
+        if (method or self.master.config.time_sync_method) is TimeSyncMethod.LAN:
+            await self._time_sync_lan()
+        else:
+            await self._time_sync_non_lan()
+
+    async def _time_sync_non_lan(self) -> None:
+        async with self._claim():
+            sent_ms = self.wall_clock_ms()
+            responses = await self._exchange(self.master.build_delay_measure())
+            received_ms = self.wall_clock_ms()
+        _raise_if_rejected("DELAY_MEASURE", responses)
+        turnaround_ms = responses[-1].time_delay_ms
+        if turnaround_ms is None:
+            msg = "DELAY_MEASURE response carried no time delay object (g52)"
+            raise TimeSyncError(msg)
+
+        delay_ms = propagation_delay_ms(sent_ms=sent_ms, received_ms=received_ms, outstation_delay_ms=turnaround_ms)
+        async with self._claim():
+            # Read the clock again rather than reuse `received_ms`: the write
+            # must carry the time it leaves the master.
+            write = self.master.build_write_time(DNP3Timestamp(self.wall_clock_ms() + delay_ms))
+            responses = await self._exchange(write)
+        _raise_if_rejected("WRITE of g50v1", responses)
+
+    async def _time_sync_lan(self) -> None:
+        async with self._claim():
+            sent_ms = self.wall_clock_ms()
+            responses = await self._exchange(self.master.build_record_current_time())
+        if responses[-1].iin & IIN.NO_FUNC_CODE_SUPPORT:
+            msg = (
+                "Outstation does not support RECORD_CURRENT_TIME; set MasterConfig.time_sync_method "
+                f"to {TimeSyncMethod.NON_LAN} or pass it to time_sync()"
+            )
+            raise TimeSyncError(msg)
+        _raise_if_rejected("RECORD_CURRENT_TIME", responses)
+
+        write = self.master.build_write_time(DNP3Timestamp(sent_ms), recorded=True)
+        _raise_if_rejected("WRITE of g50v3", await self.request(write))
 
     # -- unsolicited ----------------------------------------------------------
 
@@ -1018,6 +1141,20 @@ class MasterTcpRunner:
             msg = "Channel is closed; open() must be awaited before using the runner"
             raise MasterRunnerError(msg)
         return self.channel, self._reassembler
+
+
+def _raise_if_rejected(request: str, responses: list[ResponseInfo]) -> None:
+    """Raise `TimeSyncError` if the outstation reports it did not carry out `request`."""
+    rejected = responses[-1].iin & _REJECTED
+    if rejected:
+        msg = f"Outstation rejected {request}: {rejected.name}"
+        raise TimeSyncError(msg)
+
+
+def _warn_if_rejected(request: str, responses: list[ResponseInfo]) -> None:
+    rejected = responses[-1].iin & _REJECTED
+    if rejected:
+        logger.warning("Outstation rejected %s: %s", request, rejected.name)
 
 
 async def _read_chunk(channel: Channel, timeout: float, interrupts: tuple[asyncio.Event, ...]) -> bytes:

@@ -108,6 +108,9 @@ class ResponseInfo:
             occurrence (group 51) preceded them in the fragment or because
             their time falls past year 9999. Counted as the objects are
             decoded, so a callback sees the count so far.
+        time_delay_ms: Outstation turnaround time reported in a g52 object,
+            in milliseconds, or None if the response carried none. A
+            DELAY_MEASURE response carries one.
     """
 
     function: FunctionCode
@@ -119,6 +122,7 @@ class ResponseInfo:
     con: bool = False
     truncation: Truncation | None = None
     relative_time_without_cto: int = 0
+    time_delay_ms: int | None = None
 
 
 @runtime_checkable
