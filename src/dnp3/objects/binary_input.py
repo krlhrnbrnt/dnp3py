@@ -35,7 +35,8 @@ class _BinaryFlags(FixedSizeObject):
 
     def _pack(self) -> tuple[Any, ...]:
         quality, state, *rest = super()._pack()
-        return (int(quality) | (STATE_BIT if state else 0), *rest)
+        # BinaryQuality also names bit 7 (STATE); the state field alone decides it.
+        return ((int(quality) & ~STATE_BIT) | (STATE_BIT if state else 0), *rest)
 
     @classmethod
     def _unpack(cls, values: tuple[Any, ...]) -> Self:

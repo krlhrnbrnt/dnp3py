@@ -126,6 +126,13 @@ class TestBinaryInputFlags:
         parsed = BinaryInputFlags.from_bytes(original.to_bytes())
         assert parsed == original
 
+    @given(st.integers(0, 0xFF), st.booleans())
+    def test_state_field_wins_over_quality_state_bit(self, quality: int, state: bool) -> None:
+        """The state field alone sets bit 7; a quality carrying BinaryQuality.STATE does not."""
+        parsed = BinaryInputFlags.from_bytes(BinaryInputFlags(quality=BinaryQuality(quality), state=state).to_bytes())
+        assert parsed.state is state
+        assert parsed.quality == quality & 0x7F
+
     def test_is_online_true(self) -> None:
         """is_online returns True when ONLINE flag set."""
         obj = BinaryInputFlags(quality=BinaryQuality.ONLINE, state=False)
