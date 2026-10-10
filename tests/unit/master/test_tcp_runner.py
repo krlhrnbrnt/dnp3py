@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from dnp3.application.builder import build_null_response, build_response
+from dnp3.application.builder import build_null_response, build_response, build_unsolicited_response
 from dnp3.application.fragment import ObjectBlock, Truncation, TruncationReason
 from dnp3.application.parser import parse_request
 from dnp3.application.qualifiers import ObjectHeader
@@ -39,8 +39,8 @@ from dnp3.datalink.parser import FrameParser
 from dnp3.master.commands import ControlOperation, DirectOperateTask, SelectTask
 from dnp3.master.config import MasterConfig, TimeSyncMethod
 from dnp3.master.handler import CommandPointState, ResponseInfo
-from dnp3.master.master import Master
-from dnp3.master.polling import IntegrityPollTask
+from dnp3.master.master import IINAction, Master
+from dnp3.master.polling import ClassPollTask, IntegrityPollTask
 from dnp3.master.tcp_runner import (
     LinkError,
     LinkResetPolicy,
@@ -2808,3 +2808,193 @@ class TestCommands:
 
         assert result.is_success
         assert len(caplog.records) == 1
+
+
+def is_integrity_poll(request: bytes) -> bool:
+    """Whether `request` is a READ that includes class 0 (g60v1)."""
+    headers = [block.header for block in parse_request(request).objects]
+    return request[1] == FunctionCode.READ and any((h.group, h.variation) == (60, 1) for h in headers)
+
+
+def answer_with_iin(
+    peer: FakeOutstation, iins: list[IIN | None], stop: asyncio.Event, *, ignore: frozenset[int] = frozenset()
+) -> asyncio.Task[list[bytes]]:
+    """Answer each request with a null response carrying the next of `iins`, then set `stop`.
+
+    Requests whose position is in `ignore` are recorded but not answered.
+    """
+
+    async def serve() -> list[bytes]:
+        received: list[bytes] = []
+        for position, iin in enumerate(iins):
+            [request] = await peer.read_fragments(1)
+            received.append(request)
+            if position not in ignore:
+                await peer.send_fragment(build_null_response(iin=iin, seq=request[0] & 0x0F).to_bytes())
+        stop.set()
+        return received
+
+    return asyncio.create_task(serve())
+
+
+def class_poll_scheduler(runner: MasterTcpRunner, interval: float = 0.0) -> None:
+    """Leave one class 1 poll on the scheduler, due now; one-shot unless given an interval.
+
+    A short interval, not a long one: a task that never ran counts as last run
+    at monotonic time 0, so a long interval is not due on a freshly booted host.
+    """
+    runner.master.scheduler.clear()
+    runner.master.scheduler.add_task(ClassPollTask(class_1=True, interval=interval))
+
+
+class TestIINReactions:
+    """`run_polls()` takes the actions response IIN bits demand before scheduled polls."""
+
+    async def test_restart_runs_actions_in_priority_order(self) -> None:
+        runner, peer, _ = await open_runner()
+        class_poll_scheduler(runner, interval=0.01)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.DEVICE_RESTART, None, None, None, None], stop)
+
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        class_poll, write, integrity, enable, resumed = await responder
+
+        assert class_poll[1] == FunctionCode.READ
+        assert not is_integrity_poll(class_poll)
+        assert write[1] == FunctionCode.WRITE
+        block = written_object(write)
+        assert (block.header.group, block.header.variation) == (80, 1)
+        assert is_integrity_poll(integrity)
+        assert enable[1] == FunctionCode.ENABLE_UNSOLICITED
+        assert resumed[1:] == class_poll[1:]  # the same class poll, under a new sequence
+        assert not runner.master.pending_actions
+
+    async def test_overflow_runs_integrity_poll(self) -> None:
+        runner, peer, _ = await open_runner()
+        class_poll_scheduler(runner)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.EVENT_BUFFER_OVERFLOW, None], stop)
+
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        _, integrity = await responder
+
+        assert is_integrity_poll(integrity)
+        assert not runner.master.pending_actions
+
+    async def test_need_time_runs_time_sync_when_enabled(self) -> None:
+        runner, peer, _ = await open_runner(time_sync_on_need_time=True, time_sync_method=TimeSyncMethod.LAN)
+        class_poll_scheduler(runner)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.NEED_TIME, None, None], stop)
+
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        _, record, write = await responder
+
+        assert record[1] == FunctionCode.RECORD_CURRENT_TIME
+        assert write[1] == FunctionCode.WRITE
+        assert not runner.master.pending_actions
+
+    async def test_explicit_request_does_not_react(self) -> None:
+        """A script driving the outstation step by step keeps full control."""
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.READ: null_reply(IIN.DEVICE_RESTART)})
+
+        await runner.integrity_poll()
+        await responder
+
+        await assert_nothing_sent(channel)
+        assert IINAction.CLEAR_RESTART in runner.master.pending_actions
+
+    async def test_timed_out_action_retried(self) -> None:
+        runner, peer, _ = await open_runner(
+            response_timeout=0.2,
+            poll_retry_delay=0.05,
+            startup_integrity_poll=False,
+            enable_unsolicited_on_startup=False,
+        )
+        class_poll_scheduler(runner)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.DEVICE_RESTART, None, None], stop, ignore=frozenset({1}))
+
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        _, ignored, retried = await responder
+
+        assert ignored[1] == retried[1] == FunctionCode.WRITE
+        assert not runner.master.pending_actions
+
+    async def test_rejected_action_not_repeated(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An outstation that will not clear IIN1.7 is not asked again until the runner is reopened."""
+        runner, peer, _ = await open_runner(startup_integrity_poll=False, enable_unsolicited_on_startup=False)
+        class_poll_scheduler(runner, interval=0.01)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.DEVICE_RESTART] * 4, stop)
+
+        with caplog.at_level(logging.WARNING, logger="dnp3.master.tcp_runner"):
+            await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        requests = await responder
+
+        assert [r[1] for r in requests] == [FunctionCode.READ, FunctionCode.WRITE, FunctionCode.READ, FunctionCode.READ]
+        assert len(caplog.records) == 1
+        assert "CLEAR_RESTART" in caplog.records[0].getMessage()
+
+        await runner.close()
+        await runner.open()
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [None], stop)
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        [write] = await responder
+
+        assert write[1] == FunctionCode.WRITE
+
+    async def test_refused_clear_does_not_loop_restart_follow_ups(self) -> None:
+        """Responses to the follow-ups still carry IIN1.7, but demand no further follow-ups.
+
+        Otherwise each integrity poll's answer would demand ENABLE_UNSOLICITED
+        and each ENABLE's answer an integrity poll, and the scheduled poll would
+        never run.
+        """
+        runner, peer, _ = await open_runner()
+        class_poll_scheduler(runner, interval=0.01)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.DEVICE_RESTART] * 5, stop)
+
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        class_poll, write, integrity, enable, resumed = await responder
+
+        assert [r[1] for r in (class_poll, write, enable)] == [
+            FunctionCode.READ,
+            FunctionCode.WRITE,
+            FunctionCode.ENABLE_UNSOLICITED,
+        ]
+        assert is_integrity_poll(integrity)
+        assert resumed[1:] == class_poll[1:]
+
+    async def test_unsolicited_demand_ends_idle(self) -> None:
+        """A restart reported unsolicited is cleared now, not when the next poll falls due."""
+        runner, peer, _ = await open_runner(startup_integrity_poll=False, enable_unsolicited_on_startup=False)
+        idle_scheduler(runner)
+        stop = asyncio.Event()
+        polling = asyncio.create_task(runner.run_polls(stop=stop))
+
+        restart = build_unsolicited_response(objects=(), iin=IIN.DEVICE_RESTART, seq=0, con=True)
+        await peer.send_fragment(restart.to_bytes())
+        confirm, write = await peer.read_fragments(2, timeout=1.0)
+        await peer.send_fragment(build_null_response(seq=write[0] & 0x0F).to_bytes())
+        stop.set()
+        await asyncio.wait_for(polling, timeout=1.0)
+
+        assert confirm[1] == FunctionCode.CONFIRM
+        assert write[1] == FunctionCode.WRITE
+        assert not runner.master.pending_actions
+
+    async def test_startup_leaves_only_the_clear_pending(self) -> None:
+        """`run_polls()` after `startup()` clears the restart without repeating the startup steps."""
+        runner, peer, _ = await open_runner(time_sync_on_startup=True, time_sync_on_need_time=True)
+        restart = null_reply(IIN.DEVICE_RESTART | IIN.NEED_TIME)
+        replies = dict.fromkeys((FunctionCode.READ, FunctionCode.ENABLE_UNSOLICITED, FunctionCode.WRITE), restart)
+        responder = answer_requests(peer, 4, replies)
+
+        await runner.startup()
+        await responder
+
+        assert runner.master.pending_actions == IINAction.CLEAR_RESTART

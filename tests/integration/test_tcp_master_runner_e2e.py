@@ -38,6 +38,7 @@ from dnp3.database import (
 from dnp3.master import (
     CommandBuilder,
     CommandPointState,
+    IntegrityPollTask,
     Master,
     MasterConfig,
     MasterTcpRunner,
@@ -318,6 +319,17 @@ class TestClearRestartOverTcp:
             [after] = await asyncio.wait_for(runner.integrity_poll(), timeout=POLL_TIMEOUT)
 
         assert before.iin & IIN.DEVICE_RESTART
+        assert not after.iin & IIN.DEVICE_RESTART
+
+    async def test_run_polls_clears_restart(self) -> None:
+        """`run_polls()` sees DEVICE_RESTART in its integrity poll and clears it unprompted."""
+        async with _runner_over_tcp(Database()) as (runner, _):
+            runner.master.scheduler.clear()
+            # One-shot: run_polls() returns once it and the reactions are done.
+            runner.master.scheduler.add_task(IntegrityPollTask())
+            await asyncio.wait_for(runner.run_polls(), timeout=2.0)
+            [after] = await asyncio.wait_for(runner.integrity_poll(), timeout=POLL_TIMEOUT)
+
         assert not after.iin & IIN.DEVICE_RESTART
 
 

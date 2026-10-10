@@ -9,6 +9,7 @@ import struct
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import Flag
 from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar
 
@@ -25,6 +26,7 @@ from dnp3.application.header import RequestHeader
 from dnp3.application.parser import ParseError, parse_response
 from dnp3.application.qualifiers import CountRange, ObjectHeader, PrefixCode, RangeCode, StartStopRange
 from dnp3.core.enums import FunctionCode
+from dnp3.core.flags import IIN
 from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.master.commands import (
     CommandBuilder,
@@ -606,6 +608,19 @@ def propagation_delay_ms(*, sent_ms: int, received_ms: int, outstation_delay_ms:
     return max(0, (received_ms - sent_ms - outstation_delay_ms) // 2)
 
 
+class IINAction(Flag):
+    """Follow-up a response's IIN bits demand of the master.
+
+    Values ascend in the order a runner should take them, as in opendnp3:
+    clear the restart first, so a restart during the rest is seen.
+    """
+
+    CLEAR_RESTART = 1
+    INTEGRITY_POLL = 2
+    TIME_SYNC = 4
+    ENABLE_UNSOLICITED = 8
+
+
 @dataclass
 class Master:
     """DNP3 Master Station implementation.
@@ -622,6 +637,7 @@ class Master:
     _state: MasterStateManager = field(default_factory=MasterStateManager, init=False)
     _scheduler: PollScheduler = field(default_factory=PollScheduler, init=False)
     _pending_select: SelectTask | None = field(default=None, init=False)
+    _pending_actions: IINAction = field(default=IINAction(0), init=False)
 
     def __post_init__(self) -> None:
         """Initialize master state."""
@@ -661,6 +677,30 @@ class Master:
     def scheduler(self) -> PollScheduler:
         """Get the poll scheduler."""
         return self._scheduler
+
+    @property
+    def pending_actions(self) -> IINAction:
+        """Actions demanded by response IIN bits and not yet completed."""
+        return self._pending_actions
+
+    def complete_action(self, action: IINAction) -> None:
+        """Drop `action` from `pending_actions`."""
+        self._pending_actions &= ~action
+
+    def _demand_actions(self, iin: IIN) -> None:
+        """Record the actions `iin` demands under this master's config."""
+        config = self.config
+        if iin & IIN.DEVICE_RESTART and config.react_to_restart:
+            self._pending_actions |= IINAction.CLEAR_RESTART
+            if config.startup_integrity_poll:
+                self._pending_actions |= IINAction.INTEGRITY_POLL
+            if config.enable_unsolicited_on_startup:
+                self._pending_actions |= IINAction.ENABLE_UNSOLICITED
+        # Events were discarded, so only static values tell what they changed.
+        if iin & IIN.EVENT_BUFFER_OVERFLOW and config.integrity_on_event_overflow:
+            self._pending_actions |= IINAction.INTEGRITY_POLL
+        if iin & IIN.NEED_TIME and config.time_sync_on_need_time:
+            self._pending_actions |= IINAction.TIME_SYNC
 
     # -------------------------------------------------------------------------
     # Request Building
@@ -952,6 +992,8 @@ class Master:
                 truncation.variation,
                 qualifier,
             )
+
+        self._demand_actions(info.iin)
 
         # Handle unsolicited responses
         if info.is_unsolicited:

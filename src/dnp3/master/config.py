@@ -59,6 +59,14 @@ class MasterConfig:
         enable_unsolicited_on_startup: Send ENABLE_UNSOLICITED on startup.
         time_sync_on_startup: Perform time sync on startup.
         time_sync_method: Procedure `time_sync()` uses when not given one.
+        react_to_restart: When a response carries IIN1.7 DEVICE_RESTART,
+            `run_polls()` clears it, then runs the startup integrity poll and
+            ENABLE_UNSOLICITED as their startup flags say.
+        integrity_on_event_overflow: When a response carries IIN2.3
+            EVENT_BUFFER_OVERFLOW, `run_polls()` runs an integrity poll to
+            recover the current values of points whose events were lost.
+        time_sync_on_need_time: When a response carries IIN1.4 NEED_TIME,
+            `run_polls()` runs `time_sync()`.
         polling: Polling configuration.
     """
 
@@ -73,6 +81,9 @@ class MasterConfig:
     enable_unsolicited_on_startup: bool = True
     time_sync_on_startup: bool = False
     time_sync_method: TimeSyncMethod = TimeSyncMethod.LAN
+    react_to_restart: bool = True
+    integrity_on_event_overflow: bool = True
+    time_sync_on_need_time: bool = False
     polling: PollingConfig = field(default_factory=PollingConfig)
 
     def __post_init__(self) -> None:

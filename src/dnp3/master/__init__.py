@@ -25,7 +25,7 @@ from dnp3.master.handler import (
     SOEHandler,
     TimestampQuality,
 )
-from dnp3.master.master import Master
+from dnp3.master.master import IINAction, Master
 from dnp3.master.octet_string import OctetStringHandler, OctetStringValue
 from dnp3.master.polling import (
     ClassPollTask,
@@ -58,6 +58,7 @@ __all__ = [
     "DirectOperateTask",
     "DoubleBitInputHandler",
     "DoubleBitValue",
+    "IINAction",
     "IntegrityPollTask",
     "LinkError",
     "LinkResetPolicy",

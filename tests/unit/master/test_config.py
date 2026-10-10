@@ -93,6 +93,14 @@ class TestMasterConfig:
         assert config.time_sync_method is TimeSyncMethod.LAN
         assert isinstance(config.polling, PollingConfig)
 
+    def test_iin_reaction_defaults(self) -> None:
+        """Restart and overflow reactions are on and NEED_TIME's is off, as in opendnp3."""
+        config = MasterConfig()
+
+        assert config.react_to_restart is True
+        assert config.integrity_on_event_overflow is True
+        assert config.time_sync_on_need_time is False
+
     def test_custom_values(self) -> None:
         """Test custom master configuration."""
         polling = PollingConfig(integrity_poll_interval=1800.0)

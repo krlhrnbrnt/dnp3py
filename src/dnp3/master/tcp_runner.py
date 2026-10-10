@@ -49,7 +49,7 @@ from dnp3.master.command_status import command_point_results
 from dnp3.master.commands import DirectOperateTask, OperateTask, SelectTask
 from dnp3.master.config import TimeSyncMethod
 from dnp3.master.handler import CommandPointState, CommandTaskResult, ResponseInfo
-from dnp3.master.master import Master, propagation_delay_ms
+from dnp3.master.master import IINAction, Master, propagation_delay_ms
 from dnp3.master.polling import PollTask
 from dnp3.transport.reassembler import Reassembler, ReassemblyError
 from dnp3.transport.segment import TransportSegment
@@ -193,7 +193,8 @@ class MasterTcpRunner:
         channel: Channel to use instead of opening a TCP client. Supplied by
             tests to exercise the stack without a socket.
         poll_retry_delay: Seconds `run_polls()` waits before retrying a
-            scheduled poll that timed out or broke its sequence walk.
+            scheduled poll or IIN reaction that timed out or broke its
+            sequence walk.
         wall_clock_ms: Master clock, in milliseconds since the Unix epoch, that
             `time_sync()` sets the outstation to. Defaults to the system clock.
     """
@@ -217,6 +218,8 @@ class MasterTcpRunner:
     # way to it rather than holding the channel until its own deadline.
     _contended: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _contenders: int = field(default=0, init=False, repr=False)
+    # IIN reactions the outstation refused; `run_polls()` skips them until `open()`.
+    _disabled_actions: IINAction = field(default=IINAction(0), init=False, repr=False)
 
     @property
     def is_open(self) -> bool:
@@ -255,6 +258,7 @@ class MasterTcpRunner:
             msg = "Runner is already open; close() before opening again"
             raise MasterRunnerError(msg)
 
+        self._disabled_actions = IINAction(0)
         if self.channel is None:
             self.channel = TcpClientChannel(config=TcpConfig(host=self.host, port=self.port))
             self._owns_channel = True
@@ -320,7 +324,9 @@ class MasterTcpRunner:
         A failure raises and skips the remaining steps, which leaves unsolicited
         reporting disabled if step 1 ran. An outstation without unsolicited
         reporting rejects steps 1 and 4, so clear both flags for one. Calling
-        `startup()` again repeats the whole sequence.
+        `startup()` again repeats the whole sequence. The steps taken are
+        dropped from `Master.pending_actions`, so `run_polls()` does not repeat
+        them.
 
         Raises:
             RequestRejectedError: The outstation rejected DISABLE_UNSOLICITED or
@@ -332,14 +338,21 @@ class MasterTcpRunner:
                 burst's sequence walk.
         """
         config = self.master.config
+        done = IINAction(0)
         if config.disable_unsolicited_on_startup:
             await self._request_accepted(self.master.build_disable_unsolicited(), "DISABLE_UNSOLICITED")
         if config.time_sync_on_startup:
             await self.time_sync()
+            done |= IINAction.TIME_SYNC
         if config.startup_integrity_poll:
             await self.integrity_poll()
+            done |= IINAction.INTEGRITY_POLL
         if config.enable_unsolicited_on_startup:
             await self._request_accepted(self.master.build_enable_unsolicited(), "ENABLE_UNSOLICITED")
+            done |= IINAction.ENABLE_UNSOLICITED
+        # A restarted outstation reports IIN1.7 throughout, demanding the steps
+        # just taken. Only the clear is left for `run_polls()`.
+        self.master.complete_action(done)
 
     async def integrity_poll(self) -> list[ResponseInfo]:
         """READ Class 0/1/2/3 and report every value to the SOE handler.
@@ -806,6 +819,27 @@ class MasterTcpRunner:
         times out or breaks its sequence walk is logged and retried after
         `poll_retry_delay`; a failed link ends the loop.
 
+        The loop also takes the actions response IIN bits demand
+        (`Master.pending_actions`): before each scheduled poll, and while idle
+        as soon as an unsolicited response demands one. It takes them one at a
+        time in this order, as opendnp3 does:
+
+        1. `clear_restart()`, after IIN1.7 DEVICE_RESTART.
+        2. `integrity_poll()`, after DEVICE_RESTART, or after IIN2.3
+           EVENT_BUFFER_OVERFLOW since events were lost.
+        3. `time_sync()`, after IIN1.4 NEED_TIME.
+        4. ENABLE_UNSOLICITED for classes 1-3, after DEVICE_RESTART.
+
+        `MasterConfig` says which bits demand which actions. An action that
+        fails like a poll is retried like one. One the outstation rejects is
+        logged and not taken again until the runner is reopened. Demands the
+        reactions' own responses raise are dropped, so an outstation that
+        never clears a bit gets its reactions once per scheduled poll, not
+        back to back.
+
+        Explicit calls such as `request()` or `integrity_poll()` record the
+        demands but take no action; only this loop does.
+
         Args:
             stop: Event that ends the loop when set. Without one the loop runs
                 until cancelled, or until the scheduler has no task left.
@@ -818,12 +852,17 @@ class MasterTcpRunner:
         stop = stop if stop is not None else asyncio.Event()
 
         while not stop.is_set():
+            action = next(iter(self._actionable()), None)
+            if action is not None:
+                await self._react(action, stop)
+                continue
+
             task = self.master.scheduler.get_next_task()
             if task is None:
                 wait = self.master.scheduler.get_time_until_next()
                 if wait is None:
                     return
-                await self._idle(max(wait, 0.0), stop)
+                await self._idle(max(wait, 0.0), stop, wake_on_demand=True)
                 continue
 
             try:
@@ -839,12 +878,48 @@ class MasterTcpRunner:
                 )
                 await self._idle(self.poll_retry_delay, stop)
 
-    async def _idle(self, timeout: float, stop: asyncio.Event) -> None:
+    async def _react(self, action: IINAction, stop: asyncio.Event) -> None:
+        """Take one IIN reaction for `run_polls()`."""
+        demanded = self.master.pending_actions
+        try:
+            match action:
+                case IINAction.CLEAR_RESTART:
+                    await self.clear_restart()
+                case IINAction.INTEGRITY_POLL:
+                    await self.integrity_poll()
+                case IINAction.TIME_SYNC:
+                    await self.time_sync()
+                case _:
+                    await self._request_accepted(self.master.build_enable_unsolicited(), "ENABLE_UNSOLICITED")
+        except LinkError:
+            raise
+        except (RequestRejectedError, TimeSyncError) as exc:
+            logger.warning("%s refused, not repeated until the runner is reopened: %s", action.name, exc)
+            self._disabled_actions |= action
+        except MasterRunnerError as exc:
+            logger.warning("%s failed, retrying in %.1f s: %s", action.name, self.poll_retry_delay, exc)
+            await self._idle(self.poll_retry_delay, stop)
+            return
+        # Demands the action's own responses raised are dropped with it: an
+        # integrity poll answered with EVENT_BUFFER_OVERFLOW still set does not
+        # demand another, and after a refused clear, the follow-ups' answers
+        # carrying IIN1.7 do not demand each other. The next poll's answer
+        # demands them again.
+        self.master.complete_action(action | (self.master.pending_actions & ~demanded))
+
+    def _actionable(self) -> IINAction:
+        """Pending IIN reactions `run_polls()` has not given up on."""
+        return self.master.pending_actions & ~self._disabled_actions
+
+    async def _idle(self, timeout: float, stop: asyncio.Event, *, wake_on_demand: bool = False) -> None:
         """Handle unsolicited responses until `timeout` elapses or `stop` is set.
 
         Args:
             timeout: Seconds to idle.
             stop: Event that ends the wait early.
+            wake_on_demand: Also end the wait once an unsolicited response has
+                demanded an IIN reaction. Not for an action's own retry delay,
+                which would end at once.
 
         Raises:
             LinkError: The link failed or delivered unusable bytes.
@@ -853,6 +928,8 @@ class MasterTcpRunner:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while not stop.is_set() and loop.time() < deadline:
+            if wake_on_demand and self._actionable():
+                return
             await self._listen(deadline, stop)
 
     # -- protocol stack -------------------------------------------------------

@@ -6,11 +6,12 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from dnp3.application.builder import build_response
+from dnp3.application.builder import build_response, build_unsolicited_response
 from dnp3.application.fragment import ObjectBlock
 from dnp3.application.parser import parse_request, parse_response
 from dnp3.application.qualifiers import ObjectHeader
 from dnp3.core.enums import ControlCode, FunctionCode
+from dnp3.core.flags import IIN
 from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.master.commands import (
     CommandBuilder,
@@ -27,6 +28,7 @@ from dnp3.master.handler import (
 from dnp3.master.master import (
     QUALITY_ONLINE,
     QUALITY_STATE,
+    IINAction,
     Master,
     propagation_delay_ms,
 )
@@ -732,3 +734,59 @@ class TestProcessFragment:
             assert Master().process_response(b"\xc0") is None
 
         assert len(caplog.records) == 1
+
+
+class TestIINActions:
+    """Response IIN bits demand the actions opendnp3's master takes for them."""
+
+    def _feed(self, master: Master, iin: IIN, *, unsolicited: bool = False) -> None:
+        build = build_unsolicited_response if unsolicited else build_response
+        master.process_response(build(objects=(), iin=iin).to_bytes())
+
+    def test_restart_demands_clear_integrity_enable(self) -> None:
+        master = Master()
+        self._feed(master, IIN.DEVICE_RESTART)
+
+        assert master.pending_actions == (
+            IINAction.CLEAR_RESTART | IINAction.INTEGRITY_POLL | IINAction.ENABLE_UNSOLICITED
+        )
+
+    def test_restart_respects_startup_flags(self) -> None:
+        master = Master(config=MasterConfig(startup_integrity_poll=False, enable_unsolicited_on_startup=False))
+        self._feed(master, IIN.DEVICE_RESTART)
+
+        assert master.pending_actions == IINAction.CLEAR_RESTART
+
+    def test_restart_ignored_when_disabled(self) -> None:
+        master = Master(config=MasterConfig(react_to_restart=False))
+        self._feed(master, IIN.DEVICE_RESTART)
+
+        assert not master.pending_actions
+
+    @pytest.mark.parametrize(("enabled", "expected"), [(True, IINAction.INTEGRITY_POLL), (False, IINAction(0))])
+    def test_overflow_demands_integrity(self, enabled: bool, expected: IINAction) -> None:
+        master = Master(config=MasterConfig(integrity_on_event_overflow=enabled))
+        self._feed(master, IIN.EVENT_BUFFER_OVERFLOW)
+
+        assert master.pending_actions == expected
+
+    @pytest.mark.parametrize(("enabled", "expected"), [(True, IINAction.TIME_SYNC), (False, IINAction(0))])
+    def test_need_time_demands_sync_only_when_enabled(self, enabled: bool, expected: IINAction) -> None:
+        master = Master(config=MasterConfig(time_sync_on_need_time=enabled))
+        self._feed(master, IIN.NEED_TIME)
+
+        assert master.pending_actions == expected
+
+    def test_unsolicited_response_demands_too(self) -> None:
+        master = Master()
+        self._feed(master, IIN.EVENT_BUFFER_OVERFLOW, unsolicited=True)
+
+        assert master.pending_actions == IINAction.INTEGRITY_POLL
+
+    def test_complete_action_clears_only_that_action(self) -> None:
+        master = Master()
+        self._feed(master, IIN.DEVICE_RESTART)
+
+        master.complete_action(IINAction.CLEAR_RESTART)
+
+        assert master.pending_actions == IINAction.INTEGRITY_POLL | IINAction.ENABLE_UNSOLICITED
