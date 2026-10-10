@@ -34,16 +34,18 @@ from dnp3.master.polling import (
     PollTask,
     RangePollTask,
 )
-from dnp3.master.state import MasterState, MasterStateManager
-from dnp3.master.tcp_runner import (
+from dnp3.master.runner import (
     LinkError,
     LinkResetPolicy,
+    MasterRunner,
     MasterRunnerError,
-    MasterTcpRunner,
     RequestRejectedError,
     ResponseTimeoutError,
     TimeSyncError,
 )
+from dnp3.master.state import MasterState, MasterStateManager
+from dnp3.master.tcp_runner import MasterTcpRunner
+from dnp3.master.udp_runner import MasterUdpRunner
 
 __all__ = [
     "AnalogOutputVariation",
@@ -64,10 +66,12 @@ __all__ = [
     "LinkResetPolicy",
     "Master",
     "MasterConfig",
+    "MasterRunner",
     "MasterRunnerError",
     "MasterState",
     "MasterStateManager",
     "MasterTcpRunner",
+    "MasterUdpRunner",
     "OctetStringHandler",
     "OctetStringValue",
     "OperateTask",

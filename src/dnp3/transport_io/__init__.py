@@ -1,7 +1,7 @@
 """DNP3 I/O Layer.
 
 This module provides transport I/O abstractions for DNP3 communication,
-including TCP client/server implementations and an in-memory simulator
+including TCP client/server and UDP implementations and an in-memory simulator
 for testing.
 """
 
@@ -27,6 +27,7 @@ from dnp3.transport_io.simulator import (
 )
 from dnp3.transport_io.tcp_client import TcpClientChannel, connect
 from dnp3.transport_io.tcp_server import TcpServer, TcpServerChannel, serve
+from dnp3.transport_io.udp import UdpChannel, UdpConfig
 
 __all__ = [
     # Channel protocols and base types
@@ -50,6 +51,9 @@ __all__ = [
     "TcpServer",
     "TcpServerChannel",
     "TcpServerConfig",
+    # UDP types
+    "UdpChannel",
+    "UdpConfig",
     "connect",
     "create_channel_pair",
     "serve",

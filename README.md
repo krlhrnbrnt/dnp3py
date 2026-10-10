@@ -19,6 +19,8 @@ MESA IEEE 1815.2 DER outstation simulator introduced in v0.2.0.
   subset for RTU-class SCADA use; see [Protocol Conformance](#protocol-conformance)
   for the request rows not yet implemented
 - **Async I/O** - Built on asyncio for efficient network communication
+- **TCP and UDP masters** - `MasterTcpRunner` and `MasterUdpRunner` share one
+  API; see [DNP3 master over UDP](docs/udp-master.md)
 - **Type Safe** - Full type annotations with strict mypy compliance
 - **Well Tested** - see the CI and codecov badges above for current numbers
 - **MESA IEEE 1815.2 Outstation** - Profile-driven DER outstation simulator for
@@ -91,6 +93,17 @@ async def main():
     print(handler.analog_inputs[0].value)   # 42.0
 
 asyncio.run(main())
+```
+
+Over UDP, swap the runner and give it the outstation's endpoint
+([details](docs/udp-master.md)):
+
+```python
+from dnp3.master import MasterUdpRunner
+from dnp3.transport_io import UdpConfig
+
+async with MasterUdpRunner(master=master, udp=UdpConfig(remote_host="127.0.0.1", remote_port=20000)) as runner:
+    await runner.integrity_poll()
 ```
 
 ### Octet strings (master)
@@ -326,7 +339,7 @@ dnp3py/
 |   +-- master/         # Master implementation
 |   +-- mesa/           # MESA IEEE 1815.2 DER outstation
 |   |   +-- data/profiles/  # Bundled PicsProfile JSON files (full.json default)
-|   +-- transport_io/   # TCP/simulator channels
+|   +-- transport_io/   # TCP/UDP/simulator channels
 +-- tests/
     +-- unit/           # Unit tests
     +-- integration/    # Integration tests
