@@ -1,5 +1,8 @@
 """Tests for command operations."""
 
+from decimal import Decimal
+from fractions import Fraction
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -10,6 +13,7 @@ from dnp3.master.commands import (
     ANALOG_OUTPUT_GROUP,
     CROB_GROUP,
     CROB_VARIATION,
+    AnalogOutputVariation,
     CommandBuilder,
     CommandTask,
     ControlMode,
@@ -78,6 +82,7 @@ class TestControlOperation:
             index=10,
             analog_value=123.45,
             is_analog=True,
+            analog_variation=AnalogOutputVariation.DOUBLE64,
         )
 
         assert op.index == 10
@@ -221,7 +226,7 @@ class TestOperateTask:
     def test_build_request_analog(self) -> None:
         """Test building OPERATE request with analog operations."""
         task = OperateTask()
-        task.add_operation(ControlOperation(index=0, analog_value=75.5, is_analog=True))
+        task.add_operation(ControlOperation(index=0, analog_value=75, is_analog=True))
 
         fragment = task.build_request(seq=7)
 
@@ -317,7 +322,7 @@ class TestCommandBuilder:
         """Test adding analog operation."""
         builder = CommandBuilder()
 
-        builder.add_analog(index=10, value=123.45)
+        builder.add_analog(index=10, value=123.45, variation=AnalogOutputVariation.DOUBLE64)
 
         select = builder.build_select()
         assert len(select.operations) == 1
@@ -325,6 +330,7 @@ class TestCommandBuilder:
         assert op.index == 10
         assert op.analog_value == 123.45
         assert op.is_analog is True
+        assert op.analog_variation == AnalogOutputVariation.DOUBLE64
 
     def test_latch_on(self) -> None:
         """Test latch_on convenience method."""
@@ -571,13 +577,104 @@ class TestCommandTaskPolymorphism:
         operations = [
             ControlOperation(index=3, control_code=ControlCode.PULSE_ON, count=2, on_time=1000, off_time=500),
             ControlOperation(index=high_index, control_code=ControlCode.LATCH_OFF),
-            ControlOperation(index=3, analog_value=-1234.7, is_analog=True),
+            ControlOperation(index=3, analog_value=-1234, is_analog=True),
             ControlOperation(index=high_index, analog_value=70000, is_analog=True),
         ]
 
         for task_type in (SelectTask, OperateTask, DirectOperateTask):
             fragment = task_type(operations=list(operations)).build_request()
             assert [block.to_bytes() for block in fragment.objects] == expected, task_type.__name__
+
+
+class TestAnalogVariations:
+    """Analog output commands are encoded in the g41 variation the caller picks."""
+
+    def test_default_is_int32(self) -> None:
+        """The default variation is g41v1, a 32-bit integer then the status octet."""
+        task = CommandBuilder().add_analog(3, 42).build_direct_operate()
+        block = task.build_request().objects[0]
+
+        assert (block.header.group, block.header.variation) == (41, 1)
+        assert block.data == bytes.fromhex("01" + "03" + "2a00000000")
+
+    @pytest.mark.parametrize(
+        ("variation", "value", "body"),
+        [
+            (AnalogOutputVariation.INT16, -2, "feff00"),
+            (AnalogOutputVariation.FLOAT32, 12.5, "0000484100"),
+            (AnalogOutputVariation.DOUBLE64, 12.5, "000000000000294000"),
+        ],
+        ids=["int16", "float32", "double64"],
+    )
+    def test_variation_encoding(self, variation: AnalogOutputVariation, value: float, body: str) -> None:
+        """Each variation encodes the value in its own width (IEEE 1815-2012 A.20)."""
+        task = CommandBuilder().add_analog(7, value, variation=variation).build_direct_operate()
+        block = task.build_request().objects[0]
+
+        assert (block.header.group, block.header.variation) == (41, int(variation))
+        assert block.data == bytes.fromhex("01" + "07" + body)
+
+    def test_mixed_variations_one_block_each(self) -> None:
+        """Operations are grouped into one block per variation, in first-appearance order, after the CROB block."""
+        task = (
+            CommandBuilder()
+            .add_analog(0, 1)
+            .latch_on(5)
+            .add_analog(1, 2.5, variation=AnalogOutputVariation.FLOAT32)
+            .add_analog(2, 3)
+            .build_direct_operate()
+        )
+        blocks = task.build_request().objects
+
+        assert [(b.header.group, b.header.variation) for b in blocks] == [(12, 1), (41, 1), (41, 3)]
+        assert blocks[1].data == bytes.fromhex("02" + "00" + "0100000000" + "02" + "0300000000")
+        assert blocks[2].data == bytes.fromhex("01" + "01" + "0000204000")
+
+
+class TestAnalogValueChecks:
+    """A value the chosen variation cannot carry is refused when the operation is created."""
+
+    def test_fractional_value_rejected_for_integer_variation(self) -> None:
+        """12.7 is refused for INT32 rather than truncated; 12.0 is sent as 12."""
+        with pytest.raises(ValueError, match="FLOAT32"):
+            CommandBuilder().add_analog(0, 12.7)
+
+        block = CommandBuilder().add_analog(0, 12.0).build_direct_operate().build_request().objects[0]
+        assert block.data == bytes.fromhex("01" + "00" + "0c00000000")
+
+    @pytest.mark.parametrize(
+        ("variation", "value"),
+        [(AnalogOutputVariation.INT16, 40000), (AnalogOutputVariation.INT32, 2**31)],
+        ids=["int16", "int32"],
+    )
+    def test_out_of_range_rejected_on_creation(self, variation: AnalogOutputVariation, value: int) -> None:
+        """An integer outside the variation's range raises from add_analog, not from build_*."""
+        with pytest.raises(ValueError):
+            CommandBuilder().add_analog(0, value, variation=variation)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")], ids=["nan", "inf"])
+    def test_non_finite_rejected_for_integer_variation(self, value: float) -> None:
+        """NaN and infinity have no integer encoding."""
+        with pytest.raises(ValueError):
+            CommandBuilder().add_analog(0, value)
+
+    def test_non_float_numbers_checked_by_value(self) -> None:
+        """Numbers that are neither int nor float (Decimal, Fraction, numpy scalars) are judged by their value."""
+        block = CommandBuilder().add_analog(0, Decimal(12)).build_direct_operate().build_request().objects[0]
+        assert block.data == bytes.fromhex("01" + "00" + "0c00000000")
+
+        with pytest.raises(ValueError, match="FLOAT32"):
+            CommandBuilder().add_analog(0, Fraction(5, 2))
+
+    def test_float32_overflow_rejected(self) -> None:
+        """A value beyond float32 range raises ValueError."""
+        with pytest.raises(ValueError):
+            CommandBuilder().add_analog(0, 1e39, variation=AnalogOutputVariation.FLOAT32)
+
+    def test_direct_control_operation_checked(self) -> None:
+        """ControlOperation built directly is checked too."""
+        with pytest.raises(ValueError):
+            ControlOperation(index=0, analog_value=12.7, is_analog=True)
 
 
 class TestPrefixedBlock:

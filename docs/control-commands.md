@@ -55,7 +55,8 @@ direct_task = builder.build_direct_operate()
 ```
 
 `add_crob(index, code, count=1, on_time=0, off_time=0)` and
-`add_analog(index, value)` are the general-purpose entry points.
+`add_analog(index, value, variation=AnalogOutputVariation.INT32)` are the
+general-purpose entry points.
 `latch_on`, `latch_off`, `pulse_on`, and `pulse_off` are convenience wrappers
 around `add_crob` for the common `ControlCode` values. `ControlCode` is the
 whole g12v1 control-code octet: Trip-Close code in bits 7-6, Clear in bit 5,
@@ -130,13 +131,32 @@ request = master.build_direct_operate(builder.build_direct_operate())
 responses = outstation.process_request(request.to_bytes())
 ```
 
-`CommandBuilder.add_analog` always encodes the value as Group 41 Variation 1
-(32-bit signed integer): the analog value is truncated to an `int` before it
-is placed on the wire. If you need Variation 2 (16-bit), 3 (float32), or 4
-(float64), build the `ObjectBlock` directly against
-`dnp3.master.commands.ANALOG_OUTPUT_16_VARIATION` /
-`ANALOG_OUTPUT_FLOAT_VARIATION` / `ANALOG_OUTPUT_DOUBLE_VARIATION`; the
-builder's fluent interface does not expose variation selection.
+`CommandBuilder.add_analog` sends the value as Group 41 Variation 1 (32-bit
+signed integer) unless you pass `variation`:
+
+```python
+from dnp3.master import AnalogOutputVariation
+
+builder.add_analog(index=0, value=12.5, variation=AnalogOutputVariation.FLOAT32)
+```
+
+| `AnalogOutputVariation` | Wire format |
+|---|---|
+| `INT32` (default) | g41v1, 32-bit signed integer |
+| `INT16` | g41v2, 16-bit signed integer |
+| `FLOAT32` | g41v3, single-precision float |
+| `DOUBLE64` | g41v4, double-precision float |
+
+Level 2 outstations need only accept `INT32` and `INT16`; check the device
+profile before sending a float variation. Operations in different variations
+go out as one Group 41 block per variation in the same request.
+
+A value the chosen variation cannot carry raises `ValueError` when the
+operation is created (`add_analog` or `ControlOperation(...)`), not when the
+request is built: a fractional value such as `12.7` for `INT32` or `INT16`
+(nothing is truncated), an integer outside the variation's range, NaN or
+infinity for an integer variation, or a magnitude beyond float32 for
+`FLOAT32`. `12.0` is accepted and sent as `12`.
 
 **SELECT and OPERATE are not currently wired for analog outputs on the
 outstation side.** `CommandBuilder.build_select()` and `.build_operate()`

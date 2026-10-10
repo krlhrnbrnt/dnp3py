@@ -7,7 +7,7 @@ including SELECT, OPERATE, and DIRECT_OPERATE.
 import struct
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from enum import Enum, IntEnum, auto
 
 from dnp3.application.builder import (
     build_direct_operate_request,
@@ -35,6 +35,27 @@ QUALIFIER_2BYTE_INDEX = 0x28  # 2-byte count, 2-byte index prefix
 MAX_1BYTE_INDEX = 255  # Maximum index or count for 1-byte qualifier
 
 
+class AnalogOutputVariation(IntEnum):
+    """Group 41 variation an analog output command is sent in (IEEE 1815-2012 A.20).
+
+    Level 2 outstations need only parse INT32 and INT16; the float variations are optional.
+    """
+
+    INT32 = 1
+    INT16 = 2
+    FLOAT32 = 3
+    DOUBLE64 = 4
+
+
+# Value then the control status octet, which a request always sends as 0.
+_ANALOG_FORMATS = {
+    AnalogOutputVariation.INT32: "<iB",
+    AnalogOutputVariation.INT16: "<hB",
+    AnalogOutputVariation.FLOAT32: "<fB",
+    AnalogOutputVariation.DOUBLE64: "<dB",
+}
+
+
 class ControlMode(Enum):
     """Mode of control operation."""
 
@@ -55,6 +76,7 @@ class ControlOperation:
         off_time: Off time in milliseconds.
         analog_value: Value for analog outputs.
         is_analog: True if this is an analog output.
+        analog_variation: Group 41 variation the analog value is sent in.
     """
 
     index: int
@@ -64,6 +86,25 @@ class ControlOperation:
     off_time: int = 0
     analog_value: float = 0.0
     is_analog: bool = False
+    analog_variation: AnalogOutputVariation = AnalogOutputVariation.INT32
+
+    def __post_init__(self) -> None:
+        if self.is_analog:
+            self._analog_body()
+
+    def _analog_body(self) -> bytes:
+        """Encode the value and status octet; ValueError when the variation cannot carry the value."""
+        variation = self.analog_variation
+        value = self.analog_value
+        if variation in (AnalogOutputVariation.INT32, AnalogOutputVariation.INT16) and not isinstance(value, int):
+            value = float(value)
+            if not value.is_integer():
+                raise ValueError(f"analog value {value!r} is not an integer; send it as FLOAT32 or DOUBLE64")
+            value = int(value)
+        try:
+            return struct.pack(_ANALOG_FORMATS[variation], value, 0)
+        except (OverflowError, struct.error) as exc:
+            raise ValueError(f"analog value {value!r} is out of range for {variation.name}") from exc
 
 
 @dataclass
@@ -99,17 +140,22 @@ class CommandTask(ABC):
         self.operations.append(operation)
 
     def _build_control_blocks(self) -> list[ObjectBlock]:
-        """Build a CROB block and an analog output block, omitting either when it has no operations."""
+        """Build a CROB block, then one analog output block per variation in first-appearance order.
+
+        Blocks with no operations are omitted.
+        """
         crobs = [
             (op.index, struct.pack("<BBIIB", int(op.control_code), op.count, op.on_time, op.off_time, 0))
             for op in self.operations
             if not op.is_analog
         ]
-        analogs = [(op.index, struct.pack("<iB", int(op.analog_value), 0)) for op in self.operations if op.is_analog]
+        analogs: dict[AnalogOutputVariation, list[tuple[int, bytes]]] = {}
+        for op in self.operations:
+            if op.is_analog:
+                analogs.setdefault(op.analog_variation, []).append((op.index, op._analog_body()))
 
         blocks = [_prefixed_block(CROB_GROUP, CROB_VARIATION, crobs)] if crobs else []
-        if analogs:
-            blocks.append(_prefixed_block(ANALOG_OUTPUT_GROUP, ANALOG_OUTPUT_32_VARIATION, analogs))
+        blocks.extend(_prefixed_block(ANALOG_OUTPUT_GROUP, variation, items) for variation, items in analogs.items())
         return blocks
 
 
@@ -211,12 +257,15 @@ class CommandBuilder:
         )
         return self
 
-    def add_analog(self, index: int, value: float) -> "CommandBuilder":
+    def add_analog(
+        self, index: int, value: float, variation: AnalogOutputVariation = AnalogOutputVariation.INT32
+    ) -> "CommandBuilder":
         """Add an analog output operation.
 
         Args:
             index: Point index.
             value: Analog value.
+            variation: Group 41 variation to send the value in.
 
         Returns:
             Self for chaining.
@@ -226,6 +275,7 @@ class CommandBuilder:
                 index=index,
                 analog_value=value,
                 is_analog=True,
+                analog_variation=variation,
             )
         )
         return self

@@ -6,6 +6,7 @@ including polling, command operations, and response handling.
 
 from dnp3.master.command_status import command_point_results
 from dnp3.master.commands import (
+    AnalogOutputVariation,
     CommandBuilder,
     CommandTask,
     ControlOperation,
@@ -45,6 +46,7 @@ from dnp3.master.tcp_runner import (
 )
 
 __all__ = [
+    "AnalogOutputVariation",
     "ClassPollTask",
     "CommandBuilder",
     "CommandPointResult",

@@ -7,7 +7,7 @@ SELECT-BEFORE-OPERATE and DIRECT_OPERATE commands.
 from dnp3.core.enums import ControlCode, FunctionCode
 from dnp3.database import BinaryOutputConfig, Database
 from dnp3.master import Master
-from dnp3.master.commands import ControlOperation
+from dnp3.master.commands import AnalogOutputVariation, ControlOperation
 from dnp3.outstation import DefaultCommandHandler, Outstation
 
 
@@ -233,6 +233,32 @@ class TestAnalogOutput:
         assert request.header.function == FunctionCode.DIRECT_OPERATE
         assert len(request.objects) > 0
 
+    @staticmethod
+    def _operate_received(variation: AnalogOutputVariation, value: float) -> list[tuple[int, float]]:
+        """DIRECT_OPERATE one analog output and return what the outstation's handler received."""
+        database = Database()
+        database.add_analog_output(1)
+        received: list[tuple[int, float]] = []
+
+        class TrackingHandler(DefaultCommandHandler):
+            def direct_operate_analog_output(self, index: int, value: float):
+                received.append((index, value))
+                return super().direct_operate_analog_output(index, value)
+
+        outstation = Outstation(database=database, handler=TrackingHandler())
+        master = Master()
+        builder = master.command_builder().add_analog(1, value, variation=variation)
+        outstation.process_request(master.build_direct_operate(builder.build_direct_operate()).to_bytes())
+        return received
+
+    def test_direct_operate_float32(self) -> None:
+        """A g41v3 setpoint reaches the handler with its fraction intact."""
+        assert self._operate_received(AnalogOutputVariation.FLOAT32, 12.5) == [(1, 12.5)]
+
+    def test_direct_operate_int16(self) -> None:
+        """A negative g41v2 setpoint reaches the handler sign-extended."""
+        assert self._operate_received(AnalogOutputVariation.INT16, -2) == [(1, -2)]
+
 
 class TestCommandBuilder:
     """Test command builder fluent interface."""
@@ -310,6 +336,7 @@ class TestControlOperations:
             index=0,
             analog_value=123.45,
             is_analog=True,
+            analog_variation=AnalogOutputVariation.DOUBLE64,
         )
 
         assert op.is_analog
