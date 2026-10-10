@@ -2534,6 +2534,52 @@ class TestWriteOctetString:
         assert issubclass(dnp3.master.RequestRejectedError, MasterRunnerError)
 
 
+class TestClearRestart:
+    """`clear_restart()` clears IIN1.7 and checks the outstation did."""
+
+    async def test_clear_restart_accepted(self) -> None:
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1)
+
+        assert await runner.clear_restart() is None
+        [write] = await responder
+
+        assert write[1] == FunctionCode.WRITE
+        block = written_object(write)
+        assert (block.header.group, block.header.variation, block.header.qualifier) == (80, 1, 0x00)
+
+    async def test_clear_restart_still_set_raises(self) -> None:
+        """An answer that still carries DEVICE_RESTART means the bit was not cleared."""
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.WRITE: null_reply(IIN.DEVICE_RESTART)})
+
+        with pytest.raises(RequestRejectedError) as excinfo:
+            await runner.clear_restart()
+        await responder
+
+        assert "DEVICE_RESTART" in str(excinfo.value)
+        assert excinfo.value.iin & IIN.DEVICE_RESTART
+
+    @pytest.mark.parametrize("bit", [IIN.NO_FUNC_CODE_SUPPORT, IIN.OBJECT_UNKNOWN, IIN.PARAMETER_ERROR])
+    async def test_request_error_bits_raise(self, bit: IIN) -> None:
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.WRITE: null_reply(bit)})
+
+        with pytest.raises(RequestRejectedError) as excinfo:
+            await runner.clear_restart()
+        await responder
+
+        assert str(bit.name) in str(excinfo.value)
+        assert excinfo.value.iin & bit
+
+    async def test_other_iin_bits_accepted(self) -> None:
+        runner, peer, _ = await open_runner()
+        responder = answer_requests(peer, 1, {FunctionCode.WRITE: null_reply(IIN.DEVICE_TROUBLE | IIN.CLASS_1_EVENTS)})
+
+        await runner.clear_restart()
+        await responder
+
+
 class TestStartup:
     """`startup()` sends what the `MasterConfig` startup flags ask for, in order."""
 
@@ -2577,13 +2623,8 @@ class TestStartup:
             ("enable_unsolicited_on_startup", FunctionCode.ENABLE_UNSOLICITED),
         ],
     )
-    async def test_rejected_unsolicited_control_is_logged(
-        self,
-        flag: str,
-        function: FunctionCode,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """An outstation without unsolicited reporting does not fail startup, but it is logged."""
+    async def test_rejected_unsolicited_control_raises(self, flag: str, function: FunctionCode) -> None:
+        """An outstation without unsolicited reporting fails startup; clear the flags to skip these steps."""
         options = {
             "disable_unsolicited_on_startup": False,
             "startup_integrity_poll": False,
@@ -2592,13 +2633,12 @@ class TestStartup:
         runner, peer, _ = await open_runner(**(options | {flag: True}))
         responder = answer_requests(peer, 1, {function: null_reply(IIN.NO_FUNC_CODE_SUPPORT)})
 
-        with caplog.at_level(logging.WARNING, logger="dnp3.master.tcp_runner"):
+        with pytest.raises(RequestRejectedError) as excinfo:
             await runner.startup()
         await responder
 
-        [record] = caplog.records
-        assert function.name in record.getMessage()
-        assert "NO_FUNC_CODE_SUPPORT" in record.getMessage()
+        assert function.name in str(excinfo.value)
+        assert excinfo.value.iin & IIN.NO_FUNC_CODE_SUPPORT
 
     async def test_startup_no_flags_sends_nothing(self) -> None:
         runner, _, channel = await open_runner(

@@ -317,12 +317,14 @@ class MasterTcpRunner:
         3. `startup_integrity_poll`: `integrity_poll()`.
         4. `enable_unsolicited_on_startup`: ENABLE_UNSOLICITED for classes 1-3.
 
-        An outstation without unsolicited reporting rejects steps 1 and 4;
-        that is logged, not raised. Any other failure raises and skips the
-        remaining steps, which leaves unsolicited reporting disabled if step 1
-        ran. Calling `startup()` again repeats the whole sequence.
+        A failure raises and skips the remaining steps, which leaves unsolicited
+        reporting disabled if step 1 ran. An outstation without unsolicited
+        reporting rejects steps 1 and 4, so clear both flags for one. Calling
+        `startup()` again repeats the whole sequence.
 
         Raises:
+            RequestRejectedError: The outstation rejected DISABLE_UNSOLICITED or
+                ENABLE_UNSOLICITED.
             TimeSyncError: The outstation rejected the time synchronization.
             ResponseTimeoutError: No response arrived before the deadline.
             LinkError: The link failed or delivered unusable bytes.
@@ -331,13 +333,13 @@ class MasterTcpRunner:
         """
         config = self.master.config
         if config.disable_unsolicited_on_startup:
-            _warn_if_rejected("DISABLE_UNSOLICITED", await self.disable_unsolicited())
+            await self._request_accepted(self.master.build_disable_unsolicited(), "DISABLE_UNSOLICITED")
         if config.time_sync_on_startup:
             await self.time_sync()
         if config.startup_integrity_poll:
             await self.integrity_poll()
         if config.enable_unsolicited_on_startup:
-            _warn_if_rejected("ENABLE_UNSOLICITED", await self.enable_unsolicited())
+            await self._request_accepted(self.master.build_enable_unsolicited(), "ENABLE_UNSOLICITED")
 
     async def integrity_poll(self) -> list[ResponseInfo]:
         """READ Class 0/1/2/3 and report every value to the SOE handler.
@@ -629,11 +631,35 @@ class MasterTcpRunner:
         request = self.master.build_write_octet_string(index, value)
         await self._request_accepted(request, f"WRITE of g110v{len(value)} index {index}")
 
-    async def _request_accepted(self, request: RequestFragment, what: str) -> list[ResponseInfo]:
-        """Run `request()`, raising `RequestRejectedError` if the outstation did not carry it out."""
+    async def clear_restart(self) -> None:
+        """Clear the outstation's DEVICE_RESTART indication (IIN1.7).
+
+        An outstation sets IIN1.7 when it restarts and keeps it set until a
+        master clears it, so a master that clears it learns of the next restart.
+
+        Raises:
+            RequestRejectedError: The outstation rejected the WRITE, or its
+                answer still carries DEVICE_RESTART.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response broke the
+                burst's sequence walk.
+        """
+        await self._request_accepted(
+            self.master.build_clear_restart(), "WRITE of g80v1 clearing IIN1.7", must_clear=IIN.DEVICE_RESTART
+        )
+
+    async def _request_accepted(
+        self, request: RequestFragment, what: str, *, must_clear: IIN | None = None
+    ) -> list[ResponseInfo]:
+        """Run `request()`, raising `RequestRejectedError` if the outstation did not carry it out.
+
+        The outstation did not carry it out if the final fragment carries a
+        `_REJECTED` bit or any `must_clear` bit.
+        """
         responses = await self.request(request)
         iin = responses[-1].iin
-        rejected = iin & _REJECTED
+        rejected = iin & (_REJECTED | must_clear if must_clear else _REJECTED)
         if rejected:
             msg = f"Outstation rejected {what}: {rejected.name}"
             raise RequestRejectedError(msg, iin=iin)
@@ -1276,12 +1302,6 @@ def _raise_if_rejected(request: str, responses: list[ResponseInfo]) -> None:
     if rejected:
         msg = f"Outstation rejected {request}: {rejected.name}"
         raise TimeSyncError(msg)
-
-
-def _warn_if_rejected(request: str, responses: list[ResponseInfo]) -> None:
-    rejected = responses[-1].iin & _REJECTED
-    if rejected:
-        logger.warning("Outstation rejected %s: %s", request, rejected.name)
 
 
 async def _read_chunk(channel: Channel, timeout: float, interrupts: tuple[asyncio.Event, ...]) -> bytes:

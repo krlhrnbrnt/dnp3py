@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Generic, Protocol, TypeVar
 
 from dnp3.application.builder import (
+    build_clear_restart_request,
     build_delay_measure_request,
     build_disable_unsolicited_request,
     build_enable_unsolicited_request,
@@ -801,6 +802,15 @@ class Master:
             class_3=class_3,
             seq=seq,
         )
+
+    def build_clear_restart(self) -> RequestFragment:
+        """Build a WRITE that clears the outstation's DEVICE_RESTART indication.
+
+        Returns:
+            Request fragment for WRITE.
+        """
+        seq = self._state.get_next_request_sequence()
+        return build_clear_restart_request(seq=seq)
 
     def build_delay_measure(self) -> RequestFragment:
         """Build a DELAY_MEASURE request.

@@ -246,6 +246,15 @@ class TestMasterRequestBuilding:
             [0xC0 | fragment.sequence, 0x02, 0x32, variation, 0x07, 0x01, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
         )
 
+    def test_build_clear_restart(self) -> None:
+        """Clear restart writes 0 to IIN bit 7: g80v1, start-stop 7..7, one packed octet."""
+        master = Master()
+        previous = master.next_request_sequence()
+
+        fragment = master.build_clear_restart()
+
+        assert fragment.to_bytes() == bytes([0xC0 | (previous + 1) % 16, 0x02, 0x50, 0x01, 0x00, 0x07, 0x07, 0x00])
+
     def test_build_write_octet_string_uint8_index(self) -> None:
         """A one-string write is g110v{len}, start-stop range on the index, then the string."""
         fragment = Master().build_write_octet_string(3, b"abc")

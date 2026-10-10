@@ -458,6 +458,24 @@ def build_warm_restart_request(seq: int = 0) -> RequestFragment:
     return RequestFragment(header=header)
 
 
+def build_clear_restart_request(seq: int = 0) -> RequestFragment:
+    """Build a WRITE that clears the outstation's DEVICE_RESTART indication (IIN1.7).
+
+    A master clears IIN1.7 by writing 0 to g80v1 index 7; a master cannot set
+    an IIN bit this way (IEEE 1815-2012 4.5.5). Qualifier 0x00 is the only one
+    the subset level tables allow for g80v1.
+
+    Args:
+        seq: Sequence number.
+
+    Returns:
+        RequestFragment for WRITE.
+    """
+    header = ObjectHeader.build(group=80, variation=1, prefix=PrefixCode.NONE, range_code=RangeCode.UINT8_START_STOP)
+    block = ObjectBlock(header=header, data=StartStopRange(start=7, stop=7).to_bytes_1() + b"\x00")
+    return build_write_request((block,), seq=seq)
+
+
 def build_enable_unsolicited_request(
     class_1: bool = True,
     class_2: bool = True,

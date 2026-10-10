@@ -26,7 +26,7 @@ from typing import Any
 import pytest
 
 from dnp3.core.enums import CommandStatus, ControlCode
-from dnp3.core.flags import AnalogQuality, BinaryQuality
+from dnp3.core.flags import IIN, AnalogQuality, BinaryQuality
 from dnp3.database import (
     AnalogInputConfig,
     BinaryInputConfig,
@@ -306,6 +306,19 @@ class TestStartupOverTcp:
 
         assert handler.binary_inputs == {0: True}
         assert handler.analog_inputs == {0: 725.0}
+
+
+class TestClearRestartOverTcp:
+    """The outstation starts with DEVICE_RESTART set until a master clears it."""
+
+    async def test_clear_restart_against_outstation(self) -> None:
+        async with _runner_over_tcp(Database()) as (runner, _):
+            [before] = await asyncio.wait_for(runner.integrity_poll(), timeout=POLL_TIMEOUT)
+            await asyncio.wait_for(runner.clear_restart(), timeout=POLL_TIMEOUT)
+            [after] = await asyncio.wait_for(runner.integrity_poll(), timeout=POLL_TIMEOUT)
+
+        assert before.iin & IIN.DEVICE_RESTART
+        assert not after.iin & IIN.DEVICE_RESTART
 
 
 class _AcceptPointZero(DefaultCommandHandler):
