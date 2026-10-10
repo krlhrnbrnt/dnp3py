@@ -106,6 +106,22 @@ async with MasterUdpRunner(master=master, udp=UdpConfig(remote_host="127.0.0.1",
     await runner.integrity_poll()
 ```
 
+### Long-running master with reconnect
+
+`run()` opens the runner, runs the configured startup sequence, then polls on
+the master's schedule. When the outstation is unreachable or the link drops,
+it logs a warning, waits (1 s, doubling up to 60 s; set `reconnect_min_delay`
+and `reconnect_max_delay` to change), reconnects and runs startup again:
+
+```python
+runner = MasterTcpRunner(master=master, host="10.0.0.5", port=20000)
+stop = asyncio.Event()
+await runner.run(stop=stop)  # returns once stop is set
+```
+
+While the link is down, commands such as `direct_operate()` raise
+`MasterRunnerError` instead of waiting.
+
 ### Octet strings (master)
 
 ```python

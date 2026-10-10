@@ -10,7 +10,8 @@ build when none is supplied.
 `PollScheduler` models when a poll is due and is transport-independent.
 `poll(task)` runs one scheduled task. `run_polls()` drives the master's scheduler
 with it and listens for unsolicited responses between polls; a caller that needs
-different scheduling writes its own loop around `poll(task)` instead.
+different scheduling writes its own loop around `poll(task)` instead. `run()`
+wraps `open()`, `startup()` and `run_polls()` and reconnects when the link fails.
 
 One exchange uses the channel at a time. `request()` and `send()` wait for an
 exchange in progress, but pre-empt an idle `listen_unsolicited()`, so a command
@@ -184,6 +185,10 @@ class MasterRunner:
         poll_retry_delay: Seconds `run_polls()` waits before retrying a
             scheduled poll or IIN reaction that timed out or broke its
             sequence walk.
+        reconnect_min_delay: Seconds `run()` waits before its first
+            reconnect attempt. Each failed attempt doubles the wait.
+        reconnect_max_delay: Longest wait between `run()`'s reconnect
+            attempts.
         wall_clock_ms: Master clock, in milliseconds since the Unix epoch, that
             `time_sync()` sets the outstation to. Defaults to the system clock.
     """
@@ -193,6 +198,8 @@ class MasterRunner:
     response_timeout: float | None = None
     link_reset: LinkResetPolicy = LinkResetPolicy.ON_OPEN
     poll_retry_delay: float = 5.0
+    reconnect_min_delay: float = 1.0
+    reconnect_max_delay: float = 60.0
     wall_clock_ms: Callable[[], int] = _wall_clock_ms
 
     _parser: FrameParser = field(default_factory=FrameParser, init=False, repr=False)
@@ -875,6 +882,55 @@ class MasterRunner:
                     exc,
                 )
                 await self._idle(self.poll_retry_delay, stop)
+
+    async def run(self, *, stop: asyncio.Event | None = None) -> None:
+        """Open, run `startup()` and `run_polls()`, reconnecting whenever the link fails.
+
+        A connection that cannot be opened, a link that fails and a startup step
+        that times out all close the runner and try again after a wait. The wait
+        starts at `reconnect_min_delay`, doubles after each failed attempt up to
+        `reconnect_max_delay`, and starts over once a connection completes
+        startup. These are opendnp3's channel retry defaults.
+
+        Every connection resets the link (per `link_reset`) and runs the full
+        startup sequence again: the outstation may have restarted while the link
+        was down, losing its unsolicited reporting state.
+
+        `run()` opens and closes the runner itself, closing it on every exit,
+        including cancellation. Calls such as `direct_operate()` made while the
+        link is down raise `MasterRunnerError` rather than wait.
+
+        Args:
+            stop: Event that ends the loop when set, including during the wait
+                between attempts. Without one the loop runs until cancelled, or
+                until the scheduler has no task left.
+
+        Raises:
+            RequestRejectedError: The outstation rejected a startup request.
+                Reconnecting would not change its configuration.
+            TimeSyncError: The outstation rejected the startup time sync.
+        """
+        stop = stop if stop is not None else asyncio.Event()
+        delay = self.reconnect_min_delay
+        try:
+            while not stop.is_set():
+                try:
+                    await self.open()
+                    await self.startup()
+                    delay = self.reconnect_min_delay
+                    await self.run_polls(stop=stop)
+                    return
+                except (RequestRejectedError, TimeSyncError):
+                    raise
+                except (MasterRunnerError, ChannelError) as exc:
+                    delay = min(delay, self.reconnect_max_delay)
+                    logger.warning("Outstation link down, reconnecting in %g s: %s", delay, exc)
+                    await self.close()
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(stop.wait(), delay)
+                    delay *= 2
+        finally:
+            await self.close()
 
     async def _react(self, action: IINAction, stop: asyncio.Event) -> None:
         """Take one IIN reaction for `run_polls()`."""
