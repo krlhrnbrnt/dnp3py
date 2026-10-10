@@ -98,6 +98,16 @@ class TestIntegrityPollTask:
             # 10 seconds elapsed
             assert task.is_due() is True
 
+    def test_never_run_task_is_due_on_a_fresh_host(self) -> None:
+        """A task that has never run is due even when the monotonic clock is below its interval."""
+        task = IntegrityPollTask(interval=3600.0)
+        scheduler = PollScheduler()
+        scheduler.add_task(task)
+
+        with patch("time.monotonic", return_value=10.0):
+            assert task.is_due() is True
+            assert scheduler.get_time_until_next() == 0.0
+
     def test_is_due_when_disabled(self) -> None:
         """Test is_due when poll is disabled."""
         task = IntegrityPollTask(interval=10.0)
@@ -459,6 +469,18 @@ class TestPollScheduler:
 
         assert task1.last_poll_time == 0.0
         assert task2.last_poll_time == 0.0
+
+    def test_mark_executed_by_type(self) -> None:
+        """Marking a poll type executed restarts the interval of only the tasks of that type."""
+        scheduler = PollScheduler()
+        integrity = IntegrityPollTask(interval=3600.0)
+        class_1 = ClassPollTask(class_1=True, interval=3600.0)
+        scheduler.add_task(integrity)
+        scheduler.add_task(class_1)
+
+        with patch("time.monotonic", return_value=1000.0):
+            scheduler.mark_executed(PollType.INTEGRITY)
+            assert scheduler.get_due_tasks() == [class_1]
 
 
 class TestHelperFunctions:

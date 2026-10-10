@@ -69,6 +69,9 @@ class PollTask(ABC):
         """
         if not self.enabled:
             return False
+        # time.monotonic() has an arbitrary origin, so it can still be below the interval for a task never run.
+        if self.last_poll_time == 0:
+            return True
         if self.interval <= 0:
             return self.last_poll_time == 0  # One-shot
         return time.monotonic() - self.last_poll_time >= self.interval
@@ -235,6 +238,8 @@ class PollScheduler:
         for task in self._tasks:
             if not task.enabled or task.interval <= 0:
                 continue
+            if task.last_poll_time == 0:
+                return 0.0
 
             time_since = time.monotonic() - task.last_poll_time
             time_until = task.interval - time_since
@@ -260,6 +265,12 @@ class PollScheduler:
         """Reset timing on all tasks."""
         for task in self._tasks:
             task.reset()
+
+    def mark_executed(self, poll_type: PollType) -> None:
+        """Restart the interval of every task of this type, after the same poll ran outside the scheduler."""
+        for task in self._tasks:
+            if task.poll_type == poll_type:
+                task.mark_executed()
 
 
 def create_integrity_poll(interval: float = 3600.0) -> IntegrityPollTask:

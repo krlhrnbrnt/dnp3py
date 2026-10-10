@@ -983,6 +983,30 @@ class TestScheduledPolls:
 
         assert sent[0][0] & 0x0F == (first + 1) % 16
 
+    async def test_integrity_poll_resets_scheduled_integrity(self) -> None:
+        """An explicit integrity poll restarts the scheduled one's interval."""
+        runner, peer, _ = await open_runner()
+        runner.master.scheduler.clear()
+        runner.master.scheduler.add_task(IntegrityPollTask(interval=3600.0))
+        responder = answer_requests(peer, 1)
+
+        await runner.integrity_poll()
+        await responder
+
+        assert runner.master.scheduler.get_next_task() is None
+
+    async def test_failed_integrity_poll_keeps_schedule(self) -> None:
+        """A failed integrity poll leaves the scheduled one due, so `run_polls()` retries it."""
+        runner, _, _ = await open_runner(response_timeout=0.2)
+        task = IntegrityPollTask(interval=3600.0)
+        runner.master.scheduler.clear()
+        runner.master.scheduler.add_task(task)
+
+        with pytest.raises(ResponseTimeoutError):
+            await runner.integrity_poll()
+
+        assert task.is_due() is True
+
 
 class TestRunPolls:
     """The `run_polls()` drive loop.
@@ -2594,6 +2618,19 @@ class TestStartup:
         assert [FunctionCode(r[1]) for r in requests] == [FunctionCode.READ, FunctionCode.ENABLE_UNSOLICITED]
         await assert_nothing_sent(channel)
 
+    async def test_run_polls_after_startup_does_not_repeat_integrity(self) -> None:
+        """The startup integrity poll restarts the scheduled one, so `run_polls()` does not send it again."""
+        runner, peer, channel = await open_runner()
+        responder = answer_requests(peer, 2)
+        await runner.startup()
+        await responder
+        stop = asyncio.Event()
+
+        polling = asyncio.create_task(runner.run_polls(stop=stop))
+        await assert_nothing_sent(channel)
+        stop.set()
+        await asyncio.wait_for(polling, timeout=1.0)
+
     async def test_startup_all_flags(self) -> None:
         """Unsolicited reporting is off while the clock is set and the poll runs."""
         runner, peer, channel = await open_runner(
@@ -2838,11 +2875,7 @@ def answer_with_iin(
 
 
 def class_poll_scheduler(runner: MasterTcpRunner, interval: float = 0.0) -> None:
-    """Leave one class 1 poll on the scheduler, due now; one-shot unless given an interval.
-
-    A short interval, not a long one: a task that never ran counts as last run
-    at monotonic time 0, so a long interval is not due on a freshly booted host.
-    """
+    """Leave one class 1 poll on the scheduler, due now; one-shot unless given an interval."""
     runner.master.scheduler.clear()
     runner.master.scheduler.add_task(ClassPollTask(class_1=True, interval=interval))
 

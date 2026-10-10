@@ -50,7 +50,7 @@ from dnp3.master.commands import DirectOperateTask, OperateTask, SelectTask
 from dnp3.master.config import TimeSyncMethod
 from dnp3.master.handler import CommandPointState, CommandTaskResult, ResponseInfo
 from dnp3.master.master import IINAction, Master, propagation_delay_ms
-from dnp3.master.polling import PollTask
+from dnp3.master.polling import PollTask, PollType
 from dnp3.transport.reassembler import Reassembler, ReassemblyError
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport.segmenter import Segmenter
@@ -357,10 +357,15 @@ class MasterTcpRunner:
     async def integrity_poll(self) -> list[ResponseInfo]:
         """READ Class 0/1/2/3 and report every value to the SOE handler.
 
+        A completed poll restarts the interval of the scheduled integrity polls;
+        a failed one leaves them unchanged.
+
         Returns:
             Info for each fragment of the response burst, in arrival order.
         """
-        return await self.request(self.master.build_integrity_poll())
+        infos = await self.request(self.master.build_integrity_poll())
+        self.master.scheduler.mark_executed(PollType.INTEGRITY)
+        return infos
 
     async def class_poll(
         self,
