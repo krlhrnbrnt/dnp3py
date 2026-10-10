@@ -47,6 +47,7 @@ from dnp3.master.handler import (
     BinaryValue,
     CounterValue,
     DefaultSOEHandler,
+    HeaderInfo,
     ResponseInfo,
     SOEHandler,
     TimestampQuality,
@@ -73,6 +74,9 @@ QUALITY_STATE = 0x80
 
 OCTET_STRING_MAX_LENGTH = 255
 _OCTET_STRING_GROUP = 110
+
+# Event groups among the delivered point kinds (IEEE 1815-2012 Annex A).
+_EVENT_GROUPS = frozenset({2, 4, 11, 22, 23, 32, 33, 42, 111})
 
 
 # Qualifier field masks (IEEE 1815-2012 Table 4-1).
@@ -318,7 +322,7 @@ def _common_time_after(block: ObjectBlock, wire: WireLayout, preceding: _CommonT
     return time, TimestampQuality.UNSYNCHRONIZED if unsynchronized else TimestampQuality.SYNCHRONIZED
 
 
-def _parse_packed_binary(layout: ObjectLayout, data: bytes) -> list[BinaryValue]:
+def _parse_packed_binary(layout: ObjectLayout, data: bytes, header: HeaderInfo) -> list[BinaryValue]:
     """Parse bit-packed binary points (g1v1 / g10v1), 8 points per byte.
 
     Bounded by the range's declared count so the unused high bits of the final
@@ -338,6 +342,7 @@ def _parse_packed_binary(layout: ObjectLayout, data: bytes) -> list[BinaryValue]
                 index=layout.first_index + ordinal,
                 value=bool((payload[byte_index] >> bit) & 1),
                 quality=QUALITY_ONLINE,
+                header=header,
             )
         )
     return values
@@ -350,7 +355,9 @@ def _block_slots(block: ObjectBlock) -> ObjectLayout | None:
     return _decode_object_layout(block.header.qualifier, block.data)
 
 
-def _decode_binary(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> list[BinaryValue]:
+def _decode_binary(
+    block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo
+) -> list[BinaryValue]:
     """Decode binary input or output points: packed bits, or one flag octet per point.
 
     A layout with a time field also decodes it into `timestamp`; see `_read_timestamp`.
@@ -363,7 +370,7 @@ def _decode_binary(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None
         # A.2.1 and A.6.1 pack bits over a contiguous index range; a prefixed block has no bit layout.
         if slots.index_prefix_width:
             return []
-        return _parse_packed_binary(slots, data)
+        return _parse_packed_binary(slots, data, header)
 
     values: list[BinaryValue] = []
     for index, payload in _iter_object_slots(slots, data, wire.width):
@@ -376,12 +383,15 @@ def _decode_binary(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None
                 quality=flags & ~QUALITY_STATE,
                 timestamp=timestamp,
                 timestamp_quality=timestamp_quality,
+                header=header,
             )
         )
     return values
 
 
-def _decode_analog(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> list[AnalogValue]:
+def _decode_analog(
+    block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo
+) -> list[AnalogValue]:
     """Decode analog input or output points.
 
     A layout with a time field also decodes it into `timestamp`; see `_read_timestamp`.
@@ -403,12 +413,15 @@ def _decode_analog(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None
                 quality=quality,
                 timestamp=timestamp,
                 timestamp_quality=timestamp_quality,
+                header=header,
             )
         )
     return values
 
 
-def _decode_counter(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> list[CounterValue]:
+def _decode_counter(
+    block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo
+) -> list[CounterValue]:
     """Decode counter or frozen counter points.
 
     A layout with a time field also decodes it into `timestamp`; see `_read_timestamp`.
@@ -430,12 +443,15 @@ def _decode_counter(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | Non
                 quality=quality,
                 timestamp=timestamp,
                 timestamp_quality=timestamp_quality,
+                header=header,
             )
         )
     return values
 
 
-def _decode_double_bit(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> list[DoubleBitValue]:
+def _decode_double_bit(
+    block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo
+) -> list[DoubleBitValue]:
     """Decode double-bit binary input points: packed states, or one flag octet per point.
 
     A layout with a time field also decodes it into `timestamp`; see `_read_timestamp`.
@@ -452,7 +468,7 @@ def _decode_double_bit(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | 
         states = unpack_double_bit_states(data[slots.data_offset :], slots.count)
         # A.4.1.2.3: packed values carry no flags and are taken as online.
         return [
-            DoubleBitValue(index=slots.first_index + ordinal, state=state, quality=QUALITY_ONLINE)
+            DoubleBitValue(index=slots.first_index + ordinal, state=state, quality=QUALITY_ONLINE, header=header)
             for ordinal, state in enumerate(states)
         ]
 
@@ -466,18 +482,21 @@ def _decode_double_bit(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | 
                 quality=data[payload] & DOUBLE_BIT_FLAGS_MASK,
                 timestamp=timestamp,
                 timestamp_quality=timestamp_quality,
+                header=header,
             )
         )
     return values
 
 
-def _decode_octet_string(block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> list[OctetStringValue]:
+def _decode_octet_string(
+    block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo
+) -> list[OctetStringValue]:
     """Decode octet strings: each object is `wire.width` raw octets, the block's variation."""
     slots = _block_slots(block)
     if slots is None:
         return []
     return [
-        OctetStringValue(index=index, value=bytes(block.data[payload : payload + wire.width]))
+        OctetStringValue(index=index, value=bytes(block.data[payload : payload + wire.width]), header=header)
         for index, payload in _iter_object_slots(slots, block.data, wire.width)
     ]
 
@@ -496,8 +515,8 @@ _V = TypeVar("_V", bound=_Timed)
 class _Batch(Protocol):
     """Values of one point kind gathered from one run of consecutive blocks of that kind."""
 
-    def add(self, block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> int:
-        """Decode a block into the batch, timing relative objects from `cto`.
+    def add(self, block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo) -> int:
+        """Decode a block into the batch, timing relative objects from `cto` and tagging each value with `header`.
 
         Returns how many of the block's values have no timestamp.
         """
@@ -517,7 +536,7 @@ class _Delivery(Protocol):
 class _KindDelivery(Generic[_V]):
     """A point kind's decode function and the handler callback its values go to."""
 
-    decode: Callable[[ObjectBlock, WireLayout, _CommonTime | None], list[_V]]
+    decode: Callable[[ObjectBlock, WireLayout, _CommonTime | None, HeaderInfo], list[_V]]
     deliver: Callable[[SOEHandler, list[_V], ResponseInfo], None]
 
     def batch(self) -> "_KindBatch[_V]":
@@ -532,12 +551,12 @@ class _KindBatch(Generic[_V]):
     delivery: _KindDelivery[_V]
     values: list[_V] = field(default_factory=list)
 
-    def add(self, block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None) -> int:
-        """Decode a block into the batch, timing relative objects from `cto`.
+    def add(self, block: ObjectBlock, wire: WireLayout, cto: _CommonTime | None, header: HeaderInfo) -> int:
+        """Decode a block into the batch, timing relative objects from `cto` and tagging each value with `header`.
 
         Returns how many of the block's values have no timestamp.
         """
-        decoded = self.delivery.decode(block, wire, cto)
+        decoded = self.delivery.decode(block, wire, cto, header)
         self.values.extend(decoded)
         return sum(value.timestamp is None for value in decoded)
 
@@ -1033,7 +1052,7 @@ class Master:
         run: _Batch | None = None
         cto: _CommonTime | None = None
 
-        for block in objects:
+        for header_index, block in enumerate(objects):
             wire = layout_for(block.header.group, block.header.variation)
             if wire is None:
                 continue
@@ -1048,7 +1067,15 @@ class Master:
                     run.deliver(self.handler, info)
                 run_kind = wire.point_kind
                 run = delivery.batch()
-            untimed = run.add(block, wire, cto)
+            header = HeaderInfo(
+                group=block.header.group,
+                variation=block.header.variation,
+                qualifier=block.header.qualifier,
+                header_index=header_index,
+                is_event=block.header.group in _EVENT_GROUPS,
+                flags_valid=wire.has_flags,
+            )
+            untimed = run.add(block, wire, cto, header)
             if wire.time is TimeKind.RELATIVE:
                 info.relative_time_without_cto += untimed
 

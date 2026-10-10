@@ -4,7 +4,7 @@ Handlers for processing responses from outstations, including
 static data, events, and command responses.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -33,6 +33,29 @@ class TimestampQuality(Enum):
     """There is no timestamp."""
 
 
+@dataclass(frozen=True, slots=True)
+class HeaderInfo:
+    """The object header a value was decoded from. Fields follow opendnp3's HeaderInfo.
+
+    Attributes:
+        group: Object group of the header, for example 2 for a binary input event.
+        variation: Object variation of the header.
+        qualifier: Qualifier code of the header (IEEE 1815-2012 4.2.2.7).
+        header_index: 0-based position of the header among all of the fragment's
+            object headers, including headers the master does not deliver.
+        is_event: True for an event variation, False for a static one.
+        flags_valid: False when the variation carries no flag octet, so `quality`
+            was assumed (ONLINE, or 0 for octet strings) rather than sent.
+    """
+
+    group: int
+    variation: int
+    qualifier: int
+    header_index: int
+    is_event: bool
+    flags_valid: bool
+
+
 @dataclass(frozen=True)
 class BinaryValue:
     """Binary input/output value from response.
@@ -43,6 +66,8 @@ class BinaryValue:
         quality: Quality flags.
         timestamp: Event timestamp if available.
         timestamp_quality: Whether `timestamp` came from a synchronized clock.
+        header: The object header the value was decoded from; None when built by hand.
+            Left out of equality, so a decoded value equals one built from its fields.
     """
 
     index: int
@@ -50,6 +75,7 @@ class BinaryValue:
     quality: int = 0
     timestamp: datetime | None = None
     timestamp_quality: TimestampQuality = TimestampQuality.INVALID
+    header: HeaderInfo | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -62,6 +88,8 @@ class AnalogValue:
         quality: Quality flags.
         timestamp: Event timestamp if available.
         timestamp_quality: Whether `timestamp` came from a synchronized clock.
+        header: The object header the value was decoded from; None when built by hand.
+            Left out of equality, so a decoded value equals one built from its fields.
     """
 
     index: int
@@ -69,6 +97,7 @@ class AnalogValue:
     quality: int = 0
     timestamp: datetime | None = None
     timestamp_quality: TimestampQuality = TimestampQuality.INVALID
+    header: HeaderInfo | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -81,6 +110,8 @@ class CounterValue:
         quality: Quality flags.
         timestamp: Event timestamp if available.
         timestamp_quality: Whether `timestamp` came from a synchronized clock.
+        header: The object header the value was decoded from; None when built by hand.
+            Left out of equality, so a decoded value equals one built from its fields.
     """
 
     index: int
@@ -88,6 +119,7 @@ class CounterValue:
     quality: int = 0
     timestamp: datetime | None = None
     timestamp_quality: TimestampQuality = TimestampQuality.INVALID
+    header: HeaderInfo | None = field(default=None, compare=False)
 
 
 class CommandPointState(Enum):

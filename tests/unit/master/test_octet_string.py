@@ -45,11 +45,11 @@ def _process(body: bytes) -> tuple[OctetStringRecorder, ResponseInfo]:
 
 
 class TestOctetStringValue:
-    def test_fields_are_index_and_value(self) -> None:
+    def test_fields_are_index_value_and_header(self) -> None:
         """No quality or timestamp field: g110/g111 carry neither."""
         value = OctetStringValue(index=3, value=b"\x00abc")
 
-        assert [f.name for f in dataclasses.fields(OctetStringValue)] == ["index", "value"]
+        assert [f.name for f in dataclasses.fields(OctetStringValue)] == ["index", "value", "header"]
         assert (value.index, value.value, value.timestamp) == (3, b"\x00abc", None)
 
 

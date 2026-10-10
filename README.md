@@ -150,6 +150,23 @@ with no common time of occurrence before it in the fragment (counted in `info.re
 and `INVALID` when the value has no timestamp. `SYNCHRONIZED` reflects only the object: check `info.iin` for
 `NEED_TIME` to learn whether the outstation's clock has been set.
 
+### Object header of a value (master)
+
+```python
+class EventLogger(DefaultSOEHandler):
+    def on_binary_input(self, values, info):
+        super().on_binary_input(values, info)
+        for value in values:
+            if value.header.is_event:
+                print(f"g{value.header.group}v{value.header.variation}", value.index, value.value)
+```
+
+Every value the master delivers has `header`, a `HeaderInfo` with the `group`, `variation` and `qualifier` of the
+object header it came from, its `header_index` in the fragment, `is_event`, and `flags_valid`. The fields follow
+opendnp3's `HeaderInfo`. `flags_valid` is False for variations without a flag octet, such as packed g1v1 or g30v3,
+whose `quality` is assumed rather than sent. One callback can carry values from several consecutive headers, so read
+the header from each value. `header` is None on a value built by hand, and is ignored when comparing values.
+
 ## MESA IEEE 1815.2 Outstation
 
 The `dnp3.mesa` module is a DER-oriented outstation built on mesa-tool's

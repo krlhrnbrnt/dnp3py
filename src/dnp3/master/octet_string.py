@@ -4,10 +4,10 @@ An octet string carries raw bytes rather than a measurement, so it is delivered
 on its own callback instead of on an ``SOEHandler`` method.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from dnp3.master.handler import ResponseInfo
+from dnp3.master.handler import HeaderInfo, ResponseInfo
 
 __all__ = [
     "OctetStringHandler",
@@ -23,10 +23,13 @@ class OctetStringValue:
     Attributes:
         index: Point index.
         value: The string's octets, with no implied text encoding.
+        header: The object header the value was decoded from; None when built by hand.
+            Left out of equality, so a decoded value equals one built from its fields.
     """
 
     index: int
     value: bytes
+    header: HeaderInfo | None = field(default=None, compare=False)
 
     @property
     def timestamp(self) -> None:

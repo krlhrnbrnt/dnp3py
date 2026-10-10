@@ -4,12 +4,12 @@ A double-bit point reports one of four states rather than a bool, so it is
 delivered on its own callback instead of on ``SOEHandler.on_binary_input``.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from dnp3.core.flags import DoubleBitState
-from dnp3.master.handler import ResponseInfo, TimestampQuality
+from dnp3.master.handler import HeaderInfo, ResponseInfo, TimestampQuality
 
 __all__ = [
     "DOUBLE_BIT_FLAGS_MASK",
@@ -38,6 +38,8 @@ class DoubleBitValue:
         quality: Flag bits 0 to 5, with the state bits cleared.
         timestamp: Event timestamp if available.
         timestamp_quality: Whether `timestamp` came from a synchronized clock.
+        header: The object header the value was decoded from; None when built by hand.
+            Left out of equality, so a decoded value equals one built from its fields.
     """
 
     index: int
@@ -45,6 +47,7 @@ class DoubleBitValue:
     quality: int = 0
     timestamp: datetime | None = None
     timestamp_quality: TimestampQuality = TimestampQuality.INVALID
+    header: HeaderInfo | None = field(default=None, compare=False)
 
 
 @runtime_checkable
