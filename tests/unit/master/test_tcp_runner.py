@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import logging
 import struct
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -1956,6 +1957,7 @@ class TestPostCloseLifecycle:
             await runner.open()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Proactor loop fails or hangs closing a stalled transport")
 class TestCloseOverStalledSocket:
     """Every close the runner takes finishes when the peer has stopped reading.
 

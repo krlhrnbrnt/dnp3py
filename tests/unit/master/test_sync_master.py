@@ -188,15 +188,13 @@ def test_close_closes_an_injected_channel() -> None:
     assert not channel.is_open
 
 
-async def test_inside_running_loop_raises_without_creating_coroutine(runner: Any) -> None:
-    sync = SyncMaster(runner)
-
+async def test_inside_running_loop_raises_without_creating_coroutine(runner: Any, master: SyncMaster) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         with pytest.raises(RuntimeError, match="await"):
-            sync.integrity_poll()
+            master.integrity_poll()
         with pytest.raises(RuntimeError, match="await"):
-            sync.close()
+            master.close()
     runner.integrity_poll.assert_not_called()
     runner.close.assert_not_called()
 
