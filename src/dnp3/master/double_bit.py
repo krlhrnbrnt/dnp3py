@@ -4,6 +4,7 @@ A double-bit point reports one of four states rather than a bool, so it is
 delivered on its own callback instead of on ``SOEHandler.on_binary_input``.
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol, runtime_checkable
@@ -26,6 +27,8 @@ _STATE_SHIFT = 6
 _STATE_MASK = 0x3
 
 _POINTS_PER_OCTET = 4
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,8 +58,8 @@ class DoubleBitInputHandler(Protocol):
     """A handler that accepts double-bit binary input values.
 
     Separate from ``SOEHandler`` so existing handlers need no new method; a
-    handler without this callback is not given double-bit values, and nothing
-    reports the drop yet (#111). On Python 3.12 and later the callback must be
+    handler without this callback is not given double-bit values, and each one
+    dropped is logged at DEBUG. On Python 3.12 and later the callback must be
     found without ``__getattr__``, so a handler that forwards calls that way
     also receives none.
     """
@@ -94,6 +97,9 @@ def unpack_double_bit_states(payload: bytes, count: int) -> list[DoubleBitState]
 
 
 def deliver_double_bit_input(handler: object, values: list[DoubleBitValue], info: ResponseInfo) -> None:
-    """Hand values to a handler that implements `DoubleBitInputHandler`; others get nothing."""
+    """Hand values to a handler that implements `DoubleBitInputHandler`; for others, log each value dropped."""
     if isinstance(handler, DoubleBitInputHandler):
         handler.on_double_bit_input(values, info)
+        return
+    for value in values:
+        logger.debug("Double-bit input index %d dropped: handler has no on_double_bit_input", value.index)

@@ -4,6 +4,7 @@ An octet string carries raw bytes rather than a measurement, so it is delivered
 on its own callback instead of on an ``SOEHandler`` method.
 """
 
+import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -14,6 +15,8 @@ __all__ = [
     "OctetStringValue",
     "deliver_octet_string",
 ]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,8 @@ class OctetStringHandler(Protocol):
     """A handler that accepts octet string values and events.
 
     Separate from ``SOEHandler`` so existing handlers need no new method; a
-    handler without this callback is not given octet strings.
+    handler without this callback is not given octet strings, and each one
+    dropped is logged at DEBUG.
     """
 
     def on_octet_string(self, values: list[OctetStringValue], info: ResponseInfo) -> None:
@@ -56,6 +60,9 @@ class OctetStringHandler(Protocol):
 
 
 def deliver_octet_string(handler: object, values: list[OctetStringValue], info: ResponseInfo) -> None:
-    """Hand values to a handler that implements `OctetStringHandler`; others get nothing."""
+    """Hand values to a handler that implements `OctetStringHandler`; for others, log each value dropped."""
     if isinstance(handler, OctetStringHandler):
         handler.on_octet_string(values, info)
+        return
+    for value in values:
+        logger.debug("Octet string index %d dropped: handler has no on_octet_string", value.index)

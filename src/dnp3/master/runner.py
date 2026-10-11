@@ -407,8 +407,8 @@ class MasterRunner:
     ) -> list[ResponseInfo]:
         """READ the named event classes.
 
-        Class 0 (static data) is not a class poll upstream; use
-        `integrity_poll()` for a full snapshot.
+        Class 0 is the static data, not an event class, so it is not offered
+        here; `integrity_poll()` reads it together with classes 1 to 3.
 
         Args:
             class_1: Include Class 1 events.

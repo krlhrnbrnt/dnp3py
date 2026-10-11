@@ -5,6 +5,7 @@ and a string is that many raw octets with no flag or time field.
 """
 
 import dataclasses
+import logging
 import struct
 
 import pytest
@@ -124,6 +125,16 @@ class TestOctetStringDelivery:
         Master(handler=handler).process_response(RESPONSE_HEADER + body)
 
         assert handler.calls == [("on_binary_input", [BinaryValue(index=2, value=True, quality=0x01)])]
+
+    def test_each_value_dropped_for_lack_of_the_callback_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="dnp3.master.octet_string")
+        body = bytes([110, 1, 0x00, 7, 8]) + b"ab"
+
+        Master(handler=RecordingHandler()).process_response(RESPONSE_HEADER + body)
+
+        assert [r.levelno for r in caplog.records] == [logging.DEBUG, logging.DEBUG]
+        assert "index 7" in caplog.records[0].getMessage()
+        assert "index 8" in caplog.records[1].getMessage()
 
     def test_bytearray_data_yields_bytes(self) -> None:
         handler = OctetStringRecorder()

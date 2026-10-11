@@ -6,6 +6,7 @@ octet from A.4.2.2.2 (p. 494) and the event layouts from A.5 (pp. 495-497).
 Every response is built by hand.
 """
 
+import logging
 from datetime import UTC, datetime
 
 import pytest
@@ -262,6 +263,15 @@ class TestDelivery:
         _process(handler, body)
 
         assert handler.calls == [("on_binary_input", [BinaryValue(index=0, value=False, quality=ONLINE)])]
+
+    def test_each_value_dropped_for_lack_of_the_callback_is_logged(self, caplog: pytest.LogCaptureFixture) -> None:
+        caplog.set_level(logging.DEBUG, logger="dnp3.master.double_bit")
+
+        _process(RecordingHandler(), _range_block(3, 2, 4, 5, bytes([0x81, 0x41])))
+
+        assert [r.levelno for r in caplog.records] == [logging.DEBUG, logging.DEBUG]
+        assert "index 4" in caplog.records[0].getMessage()
+        assert "index 5" in caplog.records[1].getMessage()
 
     def test_default_handler_stores_values_by_index(self) -> None:
         handler = DefaultSOEHandler()
