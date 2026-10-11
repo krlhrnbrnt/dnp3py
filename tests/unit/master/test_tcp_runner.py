@@ -2230,9 +2230,9 @@ G30V1_INDEX_7 = bytes([0x1E, 0x01, 0x17, 0x01, 0x07, 0x01, 0xC8, 0x00, 0x00, 0x0
 
 
 class TestTruncatedFragments:
-    """A fragment the parser cannot read to the end is confirmed as before, and not silent."""
+    """A fragment the parser cannot read to the end is not confirmed, so the outstation keeps its events."""
 
-    async def test_truncated_unsolicited_during_request_is_logged_and_confirmed(
+    async def test_truncated_unsolicited_during_request_is_logged_and_not_confirmed(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Its ResponseInfo is not returned by request() and it delivers no value, so the log is its only trace."""
@@ -2246,12 +2246,10 @@ class TestTruncatedFragments:
         unsolicited = (
             bytes([0xF6, FunctionCode.UNSOLICITED_RESPONSE.value, 0x00, 0x00]) + OVER_DECLARED_G30V1 + G30V1_INDEX_7
         )
-        confirms: list[bytes] = []
 
         async def respond() -> None:
             seq = await peer.read_request_seq()
             await peer.send_fragment(unsolicited)
-            confirms.extend(await peer.read_fragments(1))
             await peer.send_fragment(analog_response(seq=seq, fir=True, fin=True, con=False, index=0, value=1.0))
 
         with caplog.at_level("WARNING", logger="dnp3.master.master"):
@@ -2261,24 +2259,47 @@ class TestTruncatedFragments:
 
         assert [(i.is_unsolicited, i.truncation) for i in infos] == [(False, None)]
         assert handler.analog_inputs == {0: pytest.approx(1.0)}
-        assert confirms == [bytes([0xD6, FunctionCode.CONFIRM.value])]
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(channel_b.read(4096), timeout=0.2)
         warnings = [r for r in caplog.records if r.name == "dnp3.master.master" and r.levelname == "WARNING"]
         assert len(warnings) == 1
         assert "data_shorter_than_declared" in warnings[0].getMessage()
         assert "group 30" in warnings[0].getMessage()
 
-    async def test_truncated_solicited_fragment_is_confirmed_and_returns_its_truncation(self) -> None:
+    async def test_truncated_non_final_fragment_ends_the_exchange_unconfirmed(self) -> None:
+        """Without a CONFIRM the outstation sends no further fragment, so waiting for one only burns the timeout."""
+        channel_a, channel_b = create_channel_pair()
+        await channel_a.open()
+        await channel_b.open()
+        runner, handler = make_runner(channel_a, response_timeout=5.0)
+        await runner.open()
+        peer = FakeOutstation(channel_b)
+
+        async def respond() -> None:
+            seq = await peer.read_request_seq()
+            # FIR, CON, no FIN.
+            header = bytes([0xA0 | seq, FunctionCode.RESPONSE.value, 0x00, 0x00])
+            await peer.send_fragment(header + G30V1_INDEX_7 + OVER_DECLARED_G30V1)
+
+        responder = asyncio.create_task(respond())
+        with pytest.raises(MasterRunnerError, match="cut short"):
+            await asyncio.wait_for(runner.integrity_poll(), timeout=1.0)
+        await responder
+
+        assert handler.analog_inputs == {7: pytest.approx(200)}
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(channel_b.read(4096), timeout=0.2)
+
+    async def test_truncated_solicited_fragment_is_not_confirmed_and_returns_its_truncation(self) -> None:
         channel_a, channel_b = create_channel_pair()
         await channel_a.open()
         await channel_b.open()
         runner, handler = make_runner(channel_a)
         await runner.open()
         peer = FakeOutstation(channel_b)
-        seq_holder: list[int] = []
 
         async def respond() -> None:
             seq = await peer.read_request_seq()
-            seq_holder.append(seq)
             # FIR, FIN, CON.
             header = bytes([0xE0 | seq, FunctionCode.RESPONSE.value, 0x00, 0x00])
             await peer.send_fragment(header + OVER_DECLARED_G30V1 + G30V1_INDEX_7)
@@ -2292,8 +2313,8 @@ class TestTruncatedFragments:
             reason=TruncationReason.DATA_SHORTER_THAN_DECLARED, offset=0, group=30, variation=1, qualifier=0x17
         )
         assert handler.analog_inputs == {}
-        confirms = await peer.read_fragments(1, timeout=0.5)
-        assert confirms == [bytes([0xC0 | seq_holder[0], FunctionCode.CONFIRM.value])]
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(channel_b.read(4096), timeout=0.2)
 
 
 def time_delay_response(*, seq: int, delay_ms: int) -> bytes:

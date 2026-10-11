@@ -426,7 +426,8 @@ class MasterRunner:
         A response may span several fragments. The outstation sets CON on every
         non-final fragment and waits for an application CONFIRM before sending
         the next, so this must answer or the exchange stalls until the
-        outstation's confirm timer expires.
+        outstation's confirm timer expires. A fragment cut short is not
+        confirmed; its `ResponseInfo.truncation` says so.
 
         Args:
             request: Application request to send.
@@ -440,8 +441,8 @@ class MasterRunner:
             LinkError: The link failed, a write did not complete before the
                 deadline, or the link delivered unusable bytes.
             MasterRunnerError: The channel is not open, a fragment broke the
-                burst's sequence walk, or the burst exceeded
-                `MAX_BURST_FRAGMENTS`.
+                burst's sequence walk, a non-final fragment was cut short, or
+                the burst exceeded `MAX_BURST_FRAGMENTS`.
         """
         self._require_open()
         async with self._claim():
@@ -472,7 +473,17 @@ class MasterRunner:
             deadline = self._deadline(None)
             burst.fragments.append(info)
 
-            if info.con:
+            # A CONFIRM lets the outstation discard the fragment's events, so one
+            # cut short goes unconfirmed: the outstation keeps them and reports
+            # them again on the next poll. Unconfirmed, it sends no further
+            # fragment, so the exchange ends here instead of at the timeout.
+            if info.con and info.truncation is not None and not info.fin:
+                msg = (
+                    f"Response fragment {len(burst.fragments)} seq={info.sequence} was cut short "
+                    "and not confirmed; abandoning the exchange"
+                )
+                raise MasterRunnerError(msg)
+            if info.con and info.truncation is None:
                 await self._send_confirm(info.sequence, uns=False, deadline=deadline)
             if info.fin:
                 return burst
@@ -1272,7 +1283,8 @@ class MasterRunner:
 
         # An unsolicited response asking for CON must be confirmed whether or
         # not the master is mid-request; the outstation retries until it is.
-        if info.is_unsolicited and info.con:
+        # One cut short is left unconfirmed so its events are not discarded.
+        if info.is_unsolicited and info.con and info.truncation is None:
             logger.debug("Confirming unsolicited response seq=%d", info.sequence)
             await self._send_confirm(info.sequence, uns=True, deadline=deadline)
             self.master.on_confirm_sent()
