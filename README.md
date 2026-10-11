@@ -21,6 +21,8 @@ MESA IEEE 1815.2 DER outstation simulator introduced in v0.2.0.
 - **Async I/O** - Built on asyncio for efficient network communication
 - **TCP, TLS and UDP masters** - `MasterTcpRunner` (optionally over [TLS](#tls)) and `MasterUdpRunner` share one
   API; see [DNP3 master over UDP](docs/udp-master.md)
+- **File upload** - the master writes and deletes outstation files (group 70); see
+  [Uploading and deleting outstation files](docs/file-transfer.md)
 - **Type Safe** - Full type annotations with strict mypy compliance
 - **Well Tested** - unit, integration and hypothesis property tests with a 95% coverage gate
 - **MESA IEEE 1815.2 Outstation** - Profile-driven DER outstation simulator for

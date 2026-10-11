@@ -135,6 +135,12 @@ class SyncMaster:
     def clear_restart(self) -> None:
         return self._run(self.runner.clear_restart)
 
+    def upload_file(self, name: str, data: bytes, *, permissions: int = 0o644) -> None:
+        return self._run(self.runner.upload_file, name, data, permissions=permissions)
+
+    def delete_file(self, name: str) -> None:
+        return self._run(self.runner.delete_file, name)
+
     def enable_unsolicited(
         self, *, class_1: bool = True, class_2: bool = True, class_3: bool = True
     ) -> list[ResponseInfo]:

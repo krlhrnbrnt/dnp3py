@@ -29,6 +29,7 @@ from dnp3.master.polling import IntegrityPollTask
 from dnp3.master.runner import AuthenticationError, SessionKeyError
 from dnp3.master.tcp_runner import MasterTcpRunner
 from dnp3.transport_io.simulator import create_channel_pair
+from tests.unit.master.test_file_runner import status_reply
 from tests.unit.master.test_tcp_runner import (
     FakeOutstation,
     RecordingHandler,
@@ -613,3 +614,22 @@ class TestKeyRenewal:
         with pytest.raises(SessionKeyError):
             await runner._react(IINAction.CLEAR_RESTART)
         await serve
+
+
+class TestFileTransfer:
+    async def test_challenged_open_completes(self) -> None:
+        """An outstation may treat OPEN_FILE as critical; the upload continues once the master answers."""
+        runner, _, sa = await open_sa_runner()
+        upload = asyncio.create_task(runner.upload_file("cfg.txt", b""))
+
+        [request] = await sa.peer.read_fragments(1)
+        assert request[1] == FunctionCode.OPEN_FILE
+        await sa.peer.send_fragment(sa.challenge(request[0] & 0x0F))
+        [reply] = await sa.peer.read_fragments(1)
+        assert reply[1] == FunctionCode.AUTHENTICATE_REQUEST
+        await sa.peer.send_fragment(status_reply()(request))
+        [close] = await sa.peer.read_fragments(1)
+        assert close[1] == FunctionCode.CLOSE_FILE
+        await sa.peer.send_fragment(status_reply(max_block=0)(close))
+
+        await upload

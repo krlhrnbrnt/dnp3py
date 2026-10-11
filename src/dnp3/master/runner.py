@@ -39,9 +39,11 @@ from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.datalink.builder import build_ack, build_link_status, build_reset_link_state, build_unconfirmed_user_data
 from dnp3.datalink.frame import DataLinkFrame
 from dnp3.datalink.parser import FrameParser
+from dnp3.master import file_transfer
 from dnp3.master.command_status import command_point_results
 from dnp3.master.commands import DirectOperateTask, OperateTask, SelectTask
 from dnp3.master.config import TimeSyncMethod
+from dnp3.master.file_transfer import FileStatus
 from dnp3.master.handler import CommandPointState, CommandTaskResult, ResponseInfo
 from dnp3.master.master import IINAction, Master, propagation_delay_ms
 from dnp3.master.polling import PollTask, PollType
@@ -129,6 +131,21 @@ def _wall_clock_ms() -> int:
     return DNP3Timestamp.now().milliseconds
 
 
+def _check_accepted(iin: IIN, what: str, must_clear: IIN | None = None) -> None:
+    """Raise `RequestRejectedError` if `iin` carries a `_REJECTED` bit or any `must_clear` bit."""
+    rejected = iin & (_REJECTED | must_clear if must_clear else _REJECTED)
+    if rejected:
+        msg = f"Outstation rejected {what}: {rejected.name}"
+        raise RequestRejectedError(msg, iin=iin)
+
+
+def _check_file_status(status: FileStatus, text: str, what: str) -> None:
+    if status is not FileStatus.SUCCESS:
+        detail = f": {text}" if text else ""
+        msg = f"{what} failed: {status.name}{detail}"
+        raise FileTransferError(msg, status=status, text=text)
+
+
 class MasterRunnerError(Exception):
     """Raised when the runner cannot complete an exchange."""
 
@@ -182,6 +199,21 @@ class SessionKeyError(AuthenticationError):
     Usually a wrong update key or an outstation without Secure Authentication,
     neither of which reconnecting fixes.
     """
+
+
+class FileTransferError(MasterRunnerError):
+    """Raised when the outstation refuses a file operation or answers it with a missing, malformed or wrong object.
+
+    Attributes:
+        status: The outstation's g70v4 or g70v6 status code; None when the
+            fault is in the answer itself.
+        text: The outstation's optional status text; empty when it sent none.
+    """
+
+    def __init__(self, message: str, *, status: FileStatus | None = None, text: str = "") -> None:
+        super().__init__(message)
+        self.status = status
+        self.text = text
 
 
 class _InterruptedError(Exception):
@@ -281,6 +313,9 @@ class MasterRunner:
     _last_rx: float | None = field(default=None, init=False, repr=False)
     # Session keys in force while `MasterConfig.secure_auth` is set; None until set up.
     _session_keys: SessionKeys | None = field(default=None, init=False, repr=False)
+
+    # Request ID of the next file command; the outstation echoes it in its g70v4.
+    _file_request_id: int = field(default=0, init=False, repr=False)
 
     @property
     def is_open(self) -> bool:
@@ -801,11 +836,155 @@ class MasterRunner:
         """
         responses = await self.request(request)
         iin = responses[-1].iin
-        rejected = iin & (_REJECTED | must_clear if must_clear else _REJECTED)
-        if rejected:
-            msg = f"Outstation rejected {what}: {rejected.name}"
-            raise RequestRejectedError(msg, iin=iin)
+        _check_accepted(iin, what, must_clear)
         return responses
+
+    # -- file transfer ----------------------------------------------------------
+
+    async def upload_file(self, name: str, data: bytes, *, permissions: int = 0o644) -> None:
+        """Write `data` to the outstation as file `name`, replacing any file of that name.
+
+        Opens the file for writing (OPEN_FILE, g70v3), sends `data` in WRITE
+        requests of one g70v5 block each, then closes it (CLOSE_FILE, g70v4).
+        Empty `data` sends no WRITE: opening for write creates the empty file.
+        Blocks have the size the outstation grants in its answer to the open,
+        which must be 1 to what one request fragment holds; a grant of 0, or
+        of more than that, raises FileTransferError. Other requests may run
+        between blocks.
+
+        When the outstation refuses a step or answers it badly, rejects a
+        request through its IIN, or times out after the open, ABORT_FILE asks
+        the outstation to drop the partial file, then the original error is
+        raised; a failed abort is only logged. A failed link, a cancelled call
+        and other runner errors (for example a Secure Authentication failure)
+        send no abort; the outstation drops the file when its handle expires.
+
+        Args:
+            name: File name on the outstation, ASCII.
+            data: File contents.
+            permissions: Unix-style permission bits for the file (g70v3).
+
+        Raises:
+            ValueError: `name` is empty, not ASCII or too long for one request
+                fragment, or `permissions` does not fit 16 bits. Nothing is sent.
+            FileTransferError: The outstation refused a step, or answered one
+                with a missing, malformed or mismatched status object.
+            RequestRejectedError: The outstation rejected a request through its IIN.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response broke the
+                burst's sequence walk.
+        """
+        fragment_size = self.master.config.max_fragment_size
+        encoded = file_transfer.encode_name(name, fragment_size)
+        proposed = file_transfer.proposed_block_size(fragment_size)
+        request_id = self._next_file_request_id()
+        request = file_transfer.build_open_write(
+            encoded,
+            size=len(data),
+            permissions=permissions,
+            created=DNP3Timestamp(self.wall_clock_ms()),
+            max_block=proposed,
+            request_id=request_id,
+            seq=self.master.next_request_sequence(),
+        )
+        opened = await self._file_command(request, request_id, f"OPEN_FILE of {name!r}")
+        try:
+            if not 0 < opened.max_block <= proposed:
+                msg = (
+                    f"OPEN_FILE of {name!r}: outstation allows blocks of {opened.max_block} octets, "
+                    f"expected 1 to {proposed}"
+                )
+                raise FileTransferError(msg)
+            for number, chunk, last in file_transfer.blocks(data, opened.max_block):
+                await self._write_file_block(opened.handle, number, chunk, last=last, name=name)
+            request_id = self._next_file_request_id()
+            close = file_transfer.build_close(
+                opened.handle, request_id=request_id, seq=self.master.next_request_sequence()
+            )
+            await self._file_command(close, request_id, f"CLOSE_FILE of {name!r}")
+        except (FileTransferError, RequestRejectedError, ResponseTimeoutError):
+            await self._abort_file(opened.handle, name)
+            raise
+
+    async def _write_file_block(self, handle: int, number: int, chunk: bytes, *, last: bool, name: str) -> None:
+        what = f"WRITE of block {number} of {name!r}"
+        request = file_transfer.build_write_block(
+            handle, number, chunk, last=last, seq=self.master.next_request_sequence()
+        )
+        objects = await self._file_exchange(request, what)
+        try:
+            status = file_transfer.transport_status(objects)
+        except ValueError as exc:
+            msg = f"{what}: {exc}"
+            raise FileTransferError(msg) from exc
+        # The echoed block number may carry the last-block bit or not; either names this block.
+        echoed = status.block_number & ~file_transfer.LAST_BLOCK
+        if status.handle != handle or echoed != number:
+            msg = (
+                f"{what}: answer is for handle {status.handle:#x} block {echoed}, "
+                f"expected handle {handle:#x} block {number}"
+            )
+            raise FileTransferError(msg)
+        _check_file_status(status.status, status.text, what)
+
+    async def _abort_file(self, handle: int, name: str) -> None:
+        """Ask the outstation to drop a partial upload, logging rather than raising a failure."""
+        request_id = self._next_file_request_id()
+        request = file_transfer.build_abort(handle, request_id=request_id, seq=self.master.next_request_sequence())
+        try:
+            await self._file_command(request, request_id, f"ABORT_FILE of {name!r}")
+        except MasterRunnerError:
+            logger.warning("ABORT_FILE of %r failed after the upload failed", name, exc_info=True)
+
+    async def delete_file(self, name: str) -> None:
+        """Delete file `name` on the outstation (DELETE_FILE, g70v3).
+
+        Raises:
+            ValueError: `name` is empty, not ASCII or too long for one request
+                fragment. Nothing is sent.
+            FileTransferError: The outstation refused the delete (for example
+                FILE_NOT_FOUND), or answered with a missing, malformed or
+                mismatched g70v4.
+            RequestRejectedError: The outstation rejected the request through its IIN.
+            ResponseTimeoutError: No response arrived before the deadline.
+            LinkError: The link failed or delivered unusable bytes.
+            MasterRunnerError: The runner is not open, or a response broke the
+                burst's sequence walk.
+        """
+        encoded = file_transfer.encode_name(name, self.master.config.max_fragment_size)
+        request_id = self._next_file_request_id()
+        request = file_transfer.build_delete(encoded, request_id=request_id, seq=self.master.next_request_sequence())
+        await self._file_command(request, request_id, f"DELETE_FILE of {name!r}")
+
+    def _next_file_request_id(self) -> int:
+        request_id = self._file_request_id
+        self._file_request_id = (request_id + 1) & 0xFFFF
+        return request_id
+
+    async def _file_exchange(self, request: RequestFragment, what: str) -> Sequence[ObjectBlock]:
+        """Run one file request and return the objects of its answer's final fragment."""
+        self._require_open()
+        async with self._claim():
+            burst = await self._exchange_burst(request)
+        _check_accepted(burst.fragments[-1].iin, what)
+        return burst.objects
+
+    async def _file_command(
+        self, request: RequestFragment, request_id: int, what: str
+    ) -> file_transfer.FileCommandStatus:
+        """Run an open, close, delete or abort and return its g70v4, which must echo `request_id` and report SUCCESS."""
+        objects = await self._file_exchange(request, what)
+        try:
+            status = file_transfer.command_status(objects)
+        except ValueError as exc:
+            msg = f"{what}: {exc}"
+            raise FileTransferError(msg) from exc
+        if status.request_id != request_id:
+            msg = f"{what}: answer carries request ID {status.request_id}, expected {request_id}"
+            raise FileTransferError(msg)
+        _check_file_status(status.status, status.text, what)
+        return status
 
     # -- secure authentication ------------------------------------------------
 

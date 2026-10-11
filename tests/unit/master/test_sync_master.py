@@ -42,6 +42,8 @@ CALLS: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = [
     ("time_sync", (TimeSyncMethod.NON_LAN,), {}),
     ("write_octet_string", (3, b"ab"), {}),
     ("clear_restart", (), {}),
+    ("upload_file", ("cfg.txt", b"abc"), {"permissions": 0o600}),
+    ("delete_file", ("cfg.txt",), {}),
     ("enable_unsolicited", (), {"class_1": True, "class_2": False, "class_3": True}),
     ("disable_unsolicited", (), {"class_1": False, "class_2": False, "class_3": True}),
     ("listen_unsolicited", (), {"timeout": 0.5}),

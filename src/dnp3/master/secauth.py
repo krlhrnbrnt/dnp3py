@@ -21,6 +21,7 @@ from dnp3.application.fragment import ObjectBlock, RequestFragment
 from dnp3.application.header import RequestHeader
 from dnp3.application.qualifiers import ObjectHeader, PrefixCode, RangeCode
 from dnp3.core.enums import FunctionCode
+from dnp3.master import free_format
 
 try:
     from cryptography.hazmat.primitives.keywrap import aes_key_wrap
@@ -153,8 +154,6 @@ GROUP = 120
 MIN_CHALLENGE_DATA_SIZE = 4
 """Clause 7 requires at least 4 octets of challenge data."""
 
-_FREE_FORMAT_QUALIFIER = 0x5B
-_FREE_FORMAT_PREFIX_SIZE = 3  # object count (1 octet) and object size (2 octets)
 _CHALLENGE = struct.Struct("<IHBB")
 _KEY_STATUS = struct.Struct("<IHBBBH")
 _ERROR = struct.Struct("<IHHB")
@@ -199,10 +198,7 @@ AuthMessage = Challenge | KeyStatusMessage | ErrorReport
 
 def free_format_block(variation: int, obj: bytes) -> ObjectBlock:
     """One g120 object behind qualifier 0x5B: a count of 1, the 2-octet object size, the object."""
-    header = ObjectHeader.build(
-        group=GROUP, variation=variation, prefix=PrefixCode.UINT16_SIZE, range_code=RangeCode.FREE_FORMAT
-    )
-    return ObjectBlock(header=header, data=b"\x01" + struct.pack("<H", len(obj)) + obj)
+    return free_format.build_block(GROUP, variation, obj)
 
 
 def build_key_status_request(user: int, seq: int) -> RequestFragment:
@@ -250,19 +246,10 @@ def decode(objects: Sequence[ObjectBlock]) -> AuthMessage:
 
 
 def _free_format_object(block: ObjectBlock) -> bytes:
-    if block.header.qualifier != _FREE_FORMAT_QUALIFIER:
-        msg = f"g120v{block.header.variation} with qualifier 0x{block.header.qualifier:02X}, expected 0x5B"
-        raise SecureAuthError(msg)
-    data = block.data
-    if len(data) < _FREE_FORMAT_PREFIX_SIZE or data[0] != 1:
-        msg = f"g120v{block.header.variation} must carry exactly one object"
-        raise SecureAuthError(msg)
-    size = int.from_bytes(data[1:_FREE_FORMAT_PREFIX_SIZE], "little")
-    body = data[_FREE_FORMAT_PREFIX_SIZE:]
-    if len(body) != size:
-        msg = f"g120v{block.header.variation} object size {size} does not match its {len(body)} octets"
-        raise SecureAuthError(msg)
-    return body
+    try:
+        return free_format.object_octets(block)
+    except ValueError as exc:
+        raise SecureAuthError(str(exc)) from exc
 
 
 def _decode_challenge(obj: bytes) -> Challenge:

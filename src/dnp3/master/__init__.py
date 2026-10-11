@@ -16,6 +16,7 @@ from dnp3.master.commands import (
 )
 from dnp3.master.config import MasterConfig, PollingConfig, SecureAuthConfig, TimeSyncMethod
 from dnp3.master.double_bit import DoubleBitInputHandler, DoubleBitValue
+from dnp3.master.file_transfer import FileStatus
 from dnp3.master.handler import (
     CommandPointResult,
     CommandPointState,
@@ -37,6 +38,7 @@ from dnp3.master.polling import (
 )
 from dnp3.master.runner import (
     AuthenticationError,
+    FileTransferError,
     LinkError,
     LinkResetPolicy,
     MasterRunner,
@@ -65,6 +67,8 @@ __all__ = [
     "DirectOperateTask",
     "DoubleBitInputHandler",
     "DoubleBitValue",
+    "FileStatus",
+    "FileTransferError",
     "HeaderInfo",
     "IINAction",
     "IntegrityPollTask",
