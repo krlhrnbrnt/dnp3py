@@ -313,6 +313,23 @@ class TestChallenges:
 
         assert request[1] == FunctionCode.WRITE
 
+    async def test_challenge_reply_restarts_the_response_timeout(self) -> None:
+        """The response may come later than one `response_timeout` after the request, but not after the reply."""
+        runner, _, sa = await open_sa_runner(response_timeout=0.4)
+
+        async def answer_slowly() -> None:
+            [request] = await sa.peer.read_fragments(1)
+            seq = request[0] & 0x0F
+            await asyncio.sleep(0.25)
+            await sa.peer.send_fragment(sa.challenge(seq))
+            await sa.peer.read_fragments(1)
+            await asyncio.sleep(0.25)
+            await sa.peer.send_fragment(build_null_response(seq=seq).to_bytes())
+
+        serve = asyncio.create_task(answer_slowly())
+        await runner.clear_restart()
+        await serve
+
     async def test_unchallenged_request_unchanged(self) -> None:
         runner, _, sa = await open_sa_runner()
         responder = answer_requests(sa.peer, 1)
