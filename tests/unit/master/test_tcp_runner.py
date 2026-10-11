@@ -2216,7 +2216,7 @@ class TestSpentDeadline:
 
         seq_holder: list[int] = []
         responder = asyncio.create_task(respond())
-        with pytest.raises(ResponseTimeoutError, match="Timed out"):
+        with pytest.raises(ResponseTimeoutError, match="No response to READ"):
             await runner.integrity_poll()
         await responder
 

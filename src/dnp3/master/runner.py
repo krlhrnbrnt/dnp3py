@@ -30,7 +30,7 @@ from enum import Enum, auto
 from typing import Self
 
 from dnp3.application.fragment import ObjectBlock, RequestFragment
-from dnp3.application.header import MAX_APP_SEQUENCE
+from dnp3.application.header import MAX_APP_SEQUENCE, ResponseHeader
 from dnp3.application.parser import ParseError, parse_response, parse_response_header
 from dnp3.core.enums import LinkFunctionCode
 from dnp3.core.flags import IIN
@@ -44,6 +44,15 @@ from dnp3.master.config import TimeSyncMethod
 from dnp3.master.handler import CommandPointState, CommandTaskResult, ResponseInfo
 from dnp3.master.master import IINAction, Master, propagation_delay_ms
 from dnp3.master.polling import PollTask, PollType
+from dnp3.master.trace import (
+    describe_iin,
+    link_logger,
+    log_frame,
+    log_request,
+    log_response,
+    log_segment,
+    transport_logger,
+)
 from dnp3.transport.reassembler import Reassembler, ReassemblyError
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport.segmenter import Segmenter
@@ -161,13 +170,22 @@ class _Burst:
         expected_seq: Sequence the next fragment must carry. Seeded with the
             request's own sequence, so the *first* fragment is correlated to the
             request rather than accepted at whatever sequence arrives.
+        request: The request this burst answers.
+        sent_at: Event-loop time the request's last frame was written.
         fragments: Info for each fragment, in arrival order.
         objects: Object blocks of the latest fragment.
+        dropped: First fragments dropped because their sequence answered some
+            other request. Reported when the exchange times out.
+        last_dropped_seq: Sequence of the latest of those.
     """
 
     expected_seq: int
+    request: RequestFragment
+    sent_at: float
     fragments: list[ResponseInfo] = field(default_factory=list)
     objects: Sequence[ObjectBlock] = ()
+    dropped: int = 0
+    last_dropped_seq: int = 0
 
 
 @dataclass
@@ -214,6 +232,10 @@ class MasterRunner:
     _contenders: int = field(default=0, init=False, repr=False)
     # IIN reactions the outstation refused; `run_polls()` skips them until `open()`.
     _disabled_actions: IINAction = field(default=IINAction(0), init=False, repr=False)
+    # Event-loop time the link parser last produced a frame, from any address.
+    # A timeout reports it, because "the link went silent" and "the outstation
+    # answered something else" are different outstation faults.
+    _last_rx: float | None = field(default=None, init=False, repr=False)
 
     @property
     def is_open(self) -> bool:
@@ -433,9 +455,16 @@ class MasterRunner:
         deadline = self._deadline(None)
         await self._send(request, deadline)
 
-        burst = _Burst(expected_seq=request.header.control.seq)
+        burst = _Burst(
+            expected_seq=request.header.control.seq,
+            request=request,
+            sent_at=asyncio.get_running_loop().time(),
+        )
         while True:
-            info = await self._next_solicited(burst, deadline)
+            try:
+                info = await self._next_solicited(burst, deadline)
+            except ResponseTimeoutError as exc:
+                raise ResponseTimeoutError(self._timeout_message(burst)) from exc
             burst.fragments.append(info)
 
             if info.con:
@@ -483,7 +512,9 @@ class MasterRunner:
 
     async def _send(self, request: RequestFragment, deadline: float) -> None:
         """Transmit a fragment; the caller holds the channel."""
+        log_request(request)
         for segment in self._segmenter.segment(request.to_bytes()):
+            log_segment("TX", segment)
             await self._write_frame(
                 build_unconfirmed_user_data(
                     destination=self.master.config.outstation_address,
@@ -1042,7 +1073,7 @@ class MasterRunner:
             return True
         if header.control.uns:
             return True
-        return self._check_sequence(burst, header.control.seq)
+        return self._check_sequence(burst, header)
 
     def _screen_unsolicited(self, data: bytes) -> bool:
         """Reject a solicited fragment while listening, before its values are parsed.
@@ -1065,12 +1096,15 @@ class MasterRunner:
         if header.control.uns:
             return True
         logger.warning(
-            "Dropping solicited response fragment with sequence %d while listening for unsolicited responses",
+            "Dropping solicited response fragment with sequence %d while listening for unsolicited responses; "
+            "%s, IIN=%s",
             header.control.seq,
+            header.function.name,
+            describe_iin(header.iin),
         )
         return False
 
-    def _check_sequence(self, burst: _Burst, sequence: int) -> bool:
+    def _check_sequence(self, burst: _Burst, header: ResponseHeader) -> bool:
         """Correlate a fragment to the request and its place in the burst.
 
         IEEE 1815-2012 clause 4.2.2.4.5: the first fragment carries the
@@ -1090,7 +1124,7 @@ class MasterRunner:
 
         Args:
             burst: Burst being accumulated.
-            sequence: Application sequence the fragment carried.
+            header: Application header of the fragment.
 
         Returns:
             True if the fragment belongs to the burst, False if it is a first
@@ -1099,12 +1133,17 @@ class MasterRunner:
         Raises:
             MasterRunnerError: A later fragment broke the burst's sequence walk.
         """
+        sequence = header.control.seq
         if sequence != burst.expected_seq:
             if not burst.fragments:
+                burst.dropped += 1
+                burst.last_dropped_seq = sequence
                 logger.warning(
-                    "Dropping response fragment with sequence %d, expected %d for the outstanding request",
+                    "Dropping response fragment with sequence %d, expected %d for the outstanding request; %s, IIN=%s",
                     sequence,
                     burst.expected_seq,
+                    header.function.name,
+                    describe_iin(header.iin),
                 )
                 return False
             position = len(burst.fragments) + 1
@@ -1115,6 +1154,36 @@ class MasterRunner:
             raise MasterRunnerError(msg)
         burst.expected_seq = (sequence + 1) % (MAX_APP_SEQUENCE + 1)
         return True
+
+    @staticmethod
+    def _awaiting(burst: _Burst | None) -> str:
+        """What the master was waiting for, for a warning about a fragment it threw away."""
+        if burst is None:
+            return "while listening for unsolicited responses"
+        header = burst.request.header
+        return f"while awaiting {header.function.name} seq={header.control.seq}"
+
+    def _timeout_message(self, burst: _Burst) -> str:
+        """Describe a solicited exchange that ran out of time, by what did arrive."""
+        facts: list[str] = []
+        if self._last_rx is None or self._last_rx < burst.sent_at:
+            facts.append("no frame received since the request")
+        else:
+            facts.append(f"last frame {asyncio.get_running_loop().time() - self._last_rx:.1f} s ago")
+        if burst.fragments:
+            facts.append(f"{_count(len(burst.fragments), 'fragment')} received, none with FIN")
+        if self._reassembler is not None and self._reassembler.segments_buffered:
+            facts.append(f"{_count(self._reassembler.segments_buffered, 'segment')} of an incomplete fragment buffered")
+        if burst.dropped:
+            facts.append(
+                f"dropped {_count(burst.dropped, 'fragment')} with sequence {burst.last_dropped_seq}, "
+                f"expected {burst.expected_seq}"
+            )
+        header = burst.request.header
+        return (
+            f"No response to {header.function.name} seq={header.control.seq} "
+            f"within {self._response_timeout():g} s: {'; '.join(facts)}"
+        )
 
     async def _receive_fragment(
         self,
@@ -1152,6 +1221,9 @@ class MasterRunner:
             MasterRunnerError: A fragment broke the burst's sequence walk.
         """
         data = await self._read_fragment_bytes(deadline, interrupts)
+        # Traced before screening, so a fragment dropped for its sequence still
+        # appears in full above the warning that drops it.
+        log_response(data, None if burst is None else (asyncio.get_running_loop().time() - burst.sent_at) * 1000)
         if burst is None:
             if not self._screen_unsolicited(data):
                 return None
@@ -1160,7 +1232,13 @@ class MasterRunner:
         try:
             response = parse_response(data)
         except ParseError as exc:
-            logger.warning("Discarding %d bytes that did not parse as a response: %s", len(data), exc)
+            logger.warning(
+                "Discarding %d bytes that did not parse as a response %s: %s | %s",
+                len(data),
+                self._awaiting(burst),
+                exc,
+                data.hex(" "),
+            )
             return None
         info = self.master.process_fragment(response)
         if burst is not None and not info.is_unsolicited:
@@ -1244,7 +1322,10 @@ class MasterRunner:
             # them inside the iteration and returning early would discard the
             # rest. A kernel that coalesces an ACK with a response, or two
             # back-to-back segments, into one read makes that routine.
-            self._pending.extend(self._parser.feed(data))
+            frames = list(self._parser.feed(data))
+            if frames:
+                self._last_rx = loop.time()
+            self._pending.extend(frames)
 
     async def _consume_frame(self, frame: DataLinkFrame, reassembler: Reassembler) -> bytes | None:
         """Filter one link frame, answer it if it is a link request, and offer its segment to the reassembler.
@@ -1261,13 +1342,20 @@ class MasterRunner:
             LinkError: The segment did not fit the stream being reassembled,
                 or a link reply could not be written.
         """
+        log_frame("RX", frame)
         config = self.master.config
         # Both addresses, not just the destination. A frame merely addressed to
         # this master may still come from another outstation on the same link,
         # and would otherwise satisfy an outstanding request with foreign values.
         if frame.header.destination != config.address:
+            link_logger.debug(
+                "RX skipped: addressed to %d, not this master (%d)", frame.header.destination, config.address
+            )
             return None
         if frame.header.source != config.outstation_address:
+            link_logger.debug(
+                "RX skipped: from %d, expected outstation %d", frame.header.source, config.outstation_address
+            )
             logger.warning(
                 "Ignoring frame addressed to this master from source %d; expected %d",
                 frame.header.source,
@@ -1276,6 +1364,7 @@ class MasterRunner:
             return None
         # DIR set means a master sent the frame, whatever its source address says.
         if frame.header.control.dir_from_master:
+            link_logger.debug("RX skipped: DIR set (frame from a master)")
             return None
         # Secondary frames (ACK, NACK, LINK_STATUS) answer the master's own link
         # requests and carry nothing to reassemble. Checked before the function
@@ -1289,7 +1378,9 @@ class MasterRunner:
             return None
 
         try:
-            result = reassembler.add(TransportSegment.from_bytes(frame.user_data))
+            segment = TransportSegment.from_bytes(frame.user_data)
+            log_segment("RX", segment)
+            result = reassembler.add(segment)
         except ReassemblyError as exc:
             # Fail closed, as the outstation sibling does: drop the partial
             # stream so the next fragment starts clean rather than being
@@ -1297,7 +1388,10 @@ class MasterRunner:
             reassembler.reset()
             msg = f"Transport reassembly failed: {exc}"
             raise LinkError(msg) from exc
-        return None if result is None else result.data
+        if result is None:
+            return None
+        transport_logger.debug("RX fragment complete: %d segments, %d bytes", result.segment_count, len(result.data))
+        return result.data
 
     async def _answer_link_request(self, frame: DataLinkFrame) -> None:
         """Send the secondary reply a primary frame calls for.
@@ -1356,6 +1450,7 @@ class MasterRunner:
             LinkError: The write failed or did not complete before the deadline.
         """
         channel, _ = self._require_open()
+        log_frame("TX", frame)
         remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
         try:
             await asyncio.wait_for(channel.write_all(frame.to_bytes()), timeout=remaining)
@@ -1366,6 +1461,10 @@ class MasterRunner:
             msg = f"Link failed while writing: {exc}"
             raise LinkError(msg) from exc
 
+    def _response_timeout(self) -> float:
+        """Seconds an exchange waits: the runner's own timeout, else the master's."""
+        return self.master.config.response_timeout if self.response_timeout is None else self.response_timeout
+
     def _deadline(self, timeout: float | None) -> float:
         """Absolute event-loop time a wait should end at.
 
@@ -1375,9 +1474,7 @@ class MasterRunner:
         Returns:
             Event-loop time of the deadline.
         """
-        if timeout is None:
-            timeout = self.master.config.response_timeout if self.response_timeout is None else self.response_timeout
-        return asyncio.get_running_loop().time() + timeout
+        return asyncio.get_running_loop().time() + (self._response_timeout() if timeout is None else timeout)
 
     @contextlib.asynccontextmanager
     async def _claim(self) -> AsyncIterator[None]:
@@ -1419,6 +1516,10 @@ class MasterRunner:
             msg = "Channel is closed; open() must be awaited before using the runner"
             raise MasterRunnerError(msg)
         return self.channel, self._reassembler
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
 
 
 def _require_operations(task: DirectOperateTask | SelectTask) -> None:

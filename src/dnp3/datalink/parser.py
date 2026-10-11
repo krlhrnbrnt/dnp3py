@@ -7,6 +7,7 @@ The parser handles:
 - Recovery from corrupted frames
 """
 
+import logging
 from collections.abc import Iterator
 from enum import Enum, auto
 
@@ -19,6 +20,8 @@ from dnp3.datalink.frame import (
     DataLinkFrame,
     DataLinkHeader,
 )
+
+logger = logging.getLogger(__name__)
 
 # Start byte values (0x05 0x64)
 _START_BYTE_0 = 0x05
@@ -152,6 +155,21 @@ def _extract_user_data(data: bytes, user_data_length: int) -> bytes | None:
     return bytes(result)
 
 
+def _bad_data_block(data: bytes, user_data_length: int) -> int:
+    """Number, from 1, of the first data block whose CRC fails."""
+    pos = 0
+    remaining = user_data_length
+    block = 1
+    while remaining > 0:
+        size = min(remaining, DATA_BLOCK_SIZE)
+        if not _validate_data_block_crc(data[pos : pos + size + 2]):
+            return block
+        pos += size + 2
+        remaining -= size
+        block += 1
+    return block
+
+
 class FrameParser:
     """Stateful byte stream parser for data link frames.
 
@@ -172,6 +190,8 @@ class FrameParser:
         """Initialize parser in hunting state."""
         self._buffer = bytearray()
         self._state = _ParserState.HUNTING
+        # Leading bytes of the next skipped run that belong to a rejected candidate, already reported.
+        self._quiet = 0
 
     @property
     def bytes_buffered(self) -> int:
@@ -182,6 +202,7 @@ class FrameParser:
         """Reset parser to initial state, clearing buffer."""
         self._buffer.clear()
         self._state = _ParserState.HUNTING
+        self._quiet = 0
 
     def feed(self, data: bytes) -> Iterator[DataLinkFrame]:
         """Feed bytes to the parser and yield complete frames.
@@ -202,6 +223,32 @@ class FrameParser:
             frames.append(frame)
         return iter(frames)
 
+    def _skip(self, count: int) -> None:
+        """Drop `count` leading bytes that cannot start a frame."""
+        if not count:
+            return
+        quiet = min(count, self._quiet)
+        self._quiet = 0
+        if count > quiet:
+            logger.warning(
+                "Skipped %d bytes before a frame start | %s", count - quiet, self._buffer[quiet:count].hex(" ")
+            )
+        del self._buffer[:count]
+
+    def _reject(self, reason: str, size: int | None = None) -> None:
+        """Report a failed frame candidate and step past its first byte to hunt again.
+
+        Args:
+            reason: Why the candidate failed.
+            size: Candidate length in bytes, or None when its LENGTH cannot be
+                trusted; the warning then shows the header and the whole next
+                skipped run is taken as the rest of the candidate.
+        """
+        shown = HEADER_SIZE if size is None else size
+        logger.warning("Rejected link frame: %s | %s", reason, self._buffer[:shown].hex(" "))
+        del self._buffer[0]
+        self._quiet = len(self._buffer) if size is None else size - 1
+
     def _try_parse_frame(self) -> DataLinkFrame | None:
         """Try to parse a complete frame from the buffer.
 
@@ -215,16 +262,12 @@ class FrameParser:
             # Hunt for start bytes
             start_pos = _find_start_bytes(self._buffer)
             if start_pos == -1:
-                # No start bytes found, keep last byte in case it's the first start byte
-                if len(self._buffer) > 0 and self._buffer[-1] == _START_BYTE_0:
-                    self._buffer = bytearray([_START_BYTE_0])
-                else:
-                    self._buffer.clear()
+                # No start bytes found; keep a trailing first start byte, whose partner may be in the next read.
+                keep = 1 if self._buffer and self._buffer[-1] == _START_BYTE_0 else 0
+                self._skip(len(self._buffer) - keep)
                 return None
 
-            # Discard bytes before start
-            if start_pos > 0:
-                del self._buffer[:start_pos]
+            self._skip(start_pos)
 
             # Need at least header
             if len(self._buffer) < HEADER_SIZE:
@@ -232,8 +275,7 @@ class FrameParser:
 
             # Validate header CRC
             if not _validate_header_crc(bytes(self._buffer[:HEADER_SIZE])):
-                # Bad CRC - skip first byte and hunt again
-                del self._buffer[0]
+                self._reject("header CRC mismatch")
                 continue
 
             # Validate LENGTH minimum (issue #65): a CRC-valid header can
@@ -242,9 +284,8 @@ class FrameParser:
             # calling DataLinkHeader.from_bytes, which now raises on this
             # case instead of resyncing.
             if not _validate_header_length(bytes(self._buffer[:HEADER_SIZE])):
-                # LENGTH too short - skip first byte and hunt again, same
-                # recovery path as a header CRC failure
-                del self._buffer[0]
+                # Same recovery path as a header CRC failure.
+                self._reject(f"LENGTH {self._buffer[2]} below minimum {LENGTH_FIELD_OVERHEAD}", HEADER_SIZE)
                 continue
 
             # Parse header to get expected frame size
@@ -261,10 +302,11 @@ class FrameParser:
             user_data = _extract_user_data(data_bytes, header.user_data_length)
 
             if user_data is None:
-                # Data block CRC failed - skip first byte and hunt again
-                del self._buffer[0]
+                block = _bad_data_block(data_bytes, header.user_data_length)
+                self._reject(f"CRC mismatch in data block {block}", frame_size)
                 continue
 
             # Success - consume frame from buffer and return
+            self._quiet = 0
             del self._buffer[:frame_size]
             return DataLinkFrame(header=header, user_data=user_data)

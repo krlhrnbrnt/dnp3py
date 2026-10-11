@@ -183,6 +183,38 @@ opendnp3's `HeaderInfo`. `flags_valid` is False for variations without a flag oc
 whose `quality` is assumed rather than sent. One callback can carry values from several consecutive headers, so read
 the header from each value. `header` is None on a value built by hand, and is ignored when comparing values.
 
+### Debug logging (master)
+
+The master traces every exchange at DEBUG, one logger per protocol layer:
+
+| Logger | Shows |
+|---|---|
+| `dnp3.master.runner.link` | Every link frame in both directions, with wire hex (CRCs included), and why a skipped frame was skipped |
+| `dnp3.master.runner.transport` | Every transport segment, and each reassembled fragment |
+| `dnp3.master.runner.app` | Every request and response: function, sequence, flags, latency, IIN by name and octet, object headers, fragment hex |
+| `dnp3.datalink.parser` | WARNING for each link frame rejected (header CRC, LENGTH, data block CRC) and each run of bytes skipped between frames, with the bytes |
+
+The parser logger is shared with the outstation and logs at WARNING, so it shows without DEBUG.
+
+`dnp3.master.runner` at DEBUG turns on all three. Silence one layer on its own:
+
+```python
+logging.getLogger("dnp3.master.runner.link").setLevel(logging.INFO)
+```
+
+A test suite that drives an outstation through the master can capture the
+trace with pytest. A failed test then shows the traffic under "Captured log
+call":
+
+```toml
+[tool.pytest.ini_options]
+log_level = "DEBUG"
+log_format = "%(asctime)s.%(msecs)03d %(levelname)-7s %(name)s %(message)s"
+log_date_format = "%H:%M:%S"
+```
+
+The trace is meant to be read, not parsed: its format may change between releases.
+
 ## MESA IEEE 1815.2 Outstation
 
 The `dnp3.mesa` module is a DER-oriented outstation built on mesa-tool's
