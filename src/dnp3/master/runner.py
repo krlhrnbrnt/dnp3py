@@ -553,6 +553,8 @@ class MasterRunner:
         # The deadline restarts on each solicited fragment, as opendnp3's
         # response timer does: a large burst over a slow link may take many
         # timeouts in total. MAX_BURST_FRAGMENTS bounds a peer that never stops.
+        # A challenge restarts it too, so the challenge reply and the wait for
+        # the response after it get a full timeout.
         deadline = self._deadline(None)
         await self._send(request, deadline)
 
@@ -566,11 +568,11 @@ class MasterRunner:
                 info = await self._next_solicited(burst, deadline)
             except ResponseTimeoutError as exc:
                 raise ResponseTimeoutError(self._timeout_message(burst)) from exc
+            deadline = self._deadline(None)
             if isinstance(info, _AuthFragment):
                 if await self._answer_auth(info, request, burst, deadline):
                     return burst
                 continue
-            deadline = self._deadline(None)
             burst.fragments.append(info)
 
             # A CONFIRM lets the outstation discard the fragment's events, so one
