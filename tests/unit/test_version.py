@@ -9,11 +9,6 @@ These tests cover two layers of the version contract:
 2. When the package is NOT installed (running from source),
    dnp3.__version__ falls back to the sentinel string "dev". This is
    the observable signal that no tag-derived version is available.
-
-The build-flag wiring (SETUPTOOLS_SCM_PRETEND_VERSION injection into the
-wheel) is separately verified by the CI smoke-test job (release.yml phase 2),
-which installs an actual wheel built with the synthetic sentinel and asserts
-importlib.metadata.version("dnp3py") matches it exactly.
 """
 
 import sys

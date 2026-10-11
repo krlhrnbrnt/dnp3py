@@ -1,7 +1,7 @@
 # Contributing to dnp3py
 
 Thanks for looking at dnp3py. This file covers how to set up a dev
-environment, run the checks CI runs, and the conventions pull requests
+environment, run the checks, and the conventions pull requests
 follow.
 
 ## Setting up
@@ -15,20 +15,16 @@ uv run pre-commit install
 
 `uv sync` creates `.venv` with the `dev` dependency group from
 `pyproject.toml` and an editable install of the package. Its default Python
-comes from `.python-version` (3.14). CI tests Python 3.11 through 3.13 only,
-so add `--python 3.13` to any command below to run it on a CI-tested
-version.
+comes from `.python-version` (3.14); add `--python 3.11` (or 3.12, 3.13)
+to any command below to run it on another version.
 
-## Running the checks CI runs
+## Running the checks
 
-`CI Check` is the required status check on `main`. It is the aggregate of
-the `test`, `quality`, and `build` jobs, and a pull request merges only once
-it passes. Review is expected on every pull request; it is a project
-practice, not a required approval enforced by GitHub. Run the same commands
-`test`, `quality`, and `build` run:
+There is no hosted CI. Run these before opening a pull request; review is
+expected on every pull request.
 
 ```bash
-uv run pytest tests/ -v --tb=short
+uv run pytest tests/ -v --tb=short --cov=src/dnp3   # fails under 95% coverage
 ```
 
 ```bash
@@ -40,22 +36,20 @@ uv run ruff check src/ tests/
 uv run mypy src/
 ```
 
-`build` also runs:
+Then check the package builds:
 
 ```bash
 uv build
 uvx twine check dist/*
 ```
 
-The `dev` group pins `ruff==0.15.18`, matching CI's `quality` job and
-`.pre-commit-config.yaml`; update all three together when upgrading ruff.
+The `dev` group pins `ruff==0.15.18`, matching `.pre-commit-config.yaml`;
+update both together when upgrading ruff.
 
 ## Conventions
 
 - Commit subjects: `type(scope): description (#NNN)`, ending with the
-  issue number when there is one, conventional-commits style. The release
-  tooling parses these to compute the next version and the changelog, so
-  the type (`feat`, `fix`, `docs`, and so on) matters.
+  issue number when there is one, conventional-commits style.
 - Branches: `type/NNN-slug`.
 - One property per pull request. A pull request that closes part of a
   larger issue, and says so, is normal.

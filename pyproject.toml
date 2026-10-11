@@ -29,8 +29,8 @@ classifiers = [
 ]
 
 [dependency-groups]
-# Installed by default with `uv sync`. ruff is pinned to match .pre-commit-config.yaml
-# and .github/workflows/ci.yml; update all three together.
+# Installed by default with `uv sync`. ruff is pinned to match .pre-commit-config.yaml;
+# update both together.
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -120,56 +120,3 @@ exclude_lines = [
 ]
 fail_under = 95
 show_missing = true
-
-# python-semantic-release: tag-authoritative, no source-file version rewriting.
-# PSR computes the semver bump from conventional commits, writes CHANGELOG.md,
-# creates the GitHub release, and pushes the tag. hatch-vcs then derives the
-# version from the tag at build time. We do NOT set version_variables so PSR
-# never rewrites a source constant.
-#
-# upload_to_pypi = false: PyPI publication is handled solely by the dedicated
-# OIDC trusted-publisher job in release.yml. Enabling PSR's own PyPI upload
-# would create a double-publish path and PSR has no OIDC credentials, making
-# it either a hard failure or a non-OIDC route that defeats trusted-publisher.
-#
-# build_command = "": PSR must NOT build or attach a distribution to the
-# GitHub release (assets is also unset, defaulting to []). The wheel that
-# reaches PyPI is rebuilt from the tag by the separate publish-pypi job.
-#
-# PSR's UPDATE-mode template only inserts new content at the
-# `<!-- version list -->` insertion_flag marker (set below, under
-# [tool.semantic_release.changelog]) and silently renders a byte-identical
-# CHANGELOG.md, with no error, when the marker is absent.
-#
-# branch = "main": PSR runs on main and tags the commit that release.yml has
-# already confirmed has a successful CI Check run. PSR pushes only the tag
-# (release.yml runs `version --no-commit`); the regenerated CHANGELOG.md is
-# pushed to a follow-up docs/changelog-vX.Y.Z branch instead of main, so a
-# required CI Check on main never sees an uncommitted, unchecked push.
-[tool.semantic_release]
-version_toml = []
-version_variables = []
-tag_format = "v{version}"
-branch = "main"
-build_command = ""
-dist_path = "dist/"
-upload_to_pypi = false
-upload_to_release = true
-commit_parser = "conventional"
-logging_use_named_masks = false
-major_on_zero = false
-allow_zero_version = true
-
-# changelog_sections documents the intended type-to-Keep-a-Changelog-section
-# mapping, but PSR's built-in template does not read this key: matching its
-# output needs a custom Jinja2 template (changelog.template_dir) that does not
-# exist yet.
-[tool.semantic_release.changelog]
-insertion_flag = "<!-- version list -->"
-changelog_sections = [
-    {type = "feat", section = "Added"},
-    {type = "fix", section = "Fixed"},
-    {type = "perf", section = "Changed"},
-    {type = "refactor", section = "Changed"},
-    {type = "docs", section = "Changed"},
-]

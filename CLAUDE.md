@@ -101,17 +101,6 @@ A reader of this code has the source and the DNP3 spec, not the conversation tha
 - **Keep them true.** A comment is part of the change it describes. When behavior changes, fix or delete the comment in the same commit.
 - **Style.** Short, complete sentences, first word capitalized unless it's an identifier. Block comment above a tricky section; inline comment only for a brief note on that line (e.g. a byte offset or bit meaning in a frame layout).
 
-## CI/CD
-
-GitHub Actions workflow (`.github/workflows/ci.yml`):
-- Test matrix: Python 3.11 to 3.14 on ubuntu-latest and macos-latest
-- Quality job: ruff format check, ruff lint, mypy
-- Build job: package build and twine check
-- Coverage uploaded to Codecov (Python 3.14 on Ubuntu only)
-- Release workflow in `.github/workflows/release.yml`
-
-Note: This is an open source library. CI uses GitHub hosted runners (ubuntu-latest, macos-latest), not self-hosted.
-
 ## Team Assignments (WRS)
 
 | Member | Scope |

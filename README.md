@@ -1,8 +1,5 @@
 # dnp3py
 
-[![CI](https://github.com/craigpnnl/dnp3py/actions/workflows/ci.yml/badge.svg)](https://github.com/craigpnnl/dnp3py/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/craigpnnl/dnp3py/graph/badge.svg)](https://codecov.io/gh/craigpnnl/dnp3py)
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/f82136e9bcbb45b6b75dd9eaf9813e8b)](https://app.codacy.com/gh/craigpnnl/dnp3py/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
 [![PyPI version](https://img.shields.io/pypi/v/dnp3py.svg)](https://pypi.org/project/dnp3py/)
 [![Python versions](https://img.shields.io/pypi/pyversions/dnp3py.svg)](https://pypi.org/project/dnp3py/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -22,7 +19,7 @@ MESA IEEE 1815.2 DER outstation simulator introduced in v0.2.0.
 - **TCP and UDP masters** - `MasterTcpRunner` and `MasterUdpRunner` share one
   API; see [DNP3 master over UDP](docs/udp-master.md)
 - **Type Safe** - Full type annotations with strict mypy compliance
-- **Well Tested** - see the CI and codecov badges above for current numbers
+- **Well Tested** - unit, integration and hypothesis property tests with a 95% coverage gate
 - **MESA IEEE 1815.2 Outstation** - Profile-driven DER outstation simulator for
   meters, DERs, inverters, and batteries
 
