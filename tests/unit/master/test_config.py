@@ -10,6 +10,7 @@ from dnp3.master.config import (
     MIN_FRAGMENT_SIZE,
     MasterConfig,
     PollingConfig,
+    SecureAuthConfig,
     TimeSyncMethod,
 )
 
@@ -215,3 +216,37 @@ class TestMasterConfig:
         assert config.address == address
         assert config.outstation_address == outstation_addr
         assert config.response_timeout == timeout
+
+
+class TestSecureAuthConfig:
+    def test_defaults(self) -> None:
+        config = SecureAuthConfig(update_key=bytes(16))
+
+        assert config.user_number == 1
+        assert config.session_key_change_interval == 600.0
+        assert MasterConfig().secure_auth is None
+
+    @pytest.mark.parametrize("length", [16, 32])
+    def test_aes_key_lengths(self, length: int) -> None:
+        assert len(SecureAuthConfig(update_key=bytes(length)).update_key) == length
+
+    @pytest.mark.parametrize("length", [0, 15, 24, 33])
+    def test_other_key_lengths_rejected(self, length: int) -> None:
+        with pytest.raises(ValueError, match="16 or 32"):
+            SecureAuthConfig(update_key=bytes(length))
+
+    @pytest.mark.parametrize("user", [0, 65536])
+    def test_user_number_range(self, user: int) -> None:
+        with pytest.raises(ValueError, match="1-65535"):
+            SecureAuthConfig(update_key=bytes(16), user_number=user)
+
+    @pytest.mark.parametrize("interval", [0.0, -1.0, float("nan")])
+    def test_interval_positive(self, interval: float) -> None:
+        with pytest.raises(ValueError, match="> 0"):
+            SecureAuthConfig(update_key=bytes(16), session_key_change_interval=interval)
+
+    def test_repr_hides_key(self) -> None:
+        key = bytes.fromhex("0123456789abcdef0123456789abcdef")
+
+        assert "0123" not in repr(SecureAuthConfig(update_key=key))
+        assert "update_key" not in repr(MasterConfig(secure_auth=SecureAuthConfig(update_key=key)))

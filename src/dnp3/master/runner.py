@@ -26,14 +26,14 @@ import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 from dnp3.application.fragment import ObjectBlock, RequestFragment
 from dnp3.application.header import MAX_APP_SEQUENCE, ResponseHeader
 from dnp3.application.parser import ParseError, parse_response, parse_response_header
-from dnp3.core.enums import LinkFunctionCode
+from dnp3.core.enums import FunctionCode, LinkFunctionCode
 from dnp3.core.flags import IIN
 from dnp3.core.timestamp import DNP3Timestamp
 from dnp3.datalink.builder import build_ack, build_link_status, build_reset_link_state, build_unconfirmed_user_data
@@ -58,6 +58,9 @@ from dnp3.transport.reassembler import Reassembler, ReassemblyError
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport.segmenter import Segmenter
 from dnp3.transport_io.channel import Channel, ChannelError
+
+if TYPE_CHECKING:
+    from dnp3.master.secauth import KeyStatusMessage, SessionKeys
 
 logger = logging.getLogger(__name__)
 
@@ -159,8 +162,38 @@ class RequestRejectedError(MasterRunnerError):
         self.iin = iin
 
 
+class AuthenticationError(MasterRunnerError):
+    """Raised when Secure Authentication fails for a request (IEEE 1815-2012 clause 7).
+
+    The request is never resent: the outstation may already have acted on it.
+
+    Attributes:
+        code: The outstation's g120v7 error code, or None when the master gave up on its own.
+    """
+
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class SessionKeyError(AuthenticationError):
+    """Raised when session keys cannot be set up.
+
+    Usually a wrong update key or an outstation without Secure Authentication,
+    neither of which reconnecting fixes.
+    """
+
+
 class _InterruptedError(Exception):
     """Raised inside the runner when a wait gives way to another exchange or a stop."""
+
+
+@dataclass(frozen=True)
+class _AuthFragment:
+    """An AUTHENTICATE_RESPONSE received in place of a response. Its bytes are MAC input."""
+
+    data: bytes
+    objects: Sequence[ObjectBlock]
 
 
 @dataclass
@@ -178,6 +211,9 @@ class _Burst:
         dropped: First fragments dropped because their sequence answered some
             other request. Reported when the exchange times out.
         last_dropped_seq: Sequence of the latest of those.
+        auth: An authentication response waiting to be answered.
+        key_status: The g120v5 key status that ended the exchange, if one did.
+        challenged: Whether the outstation has challenged the request once already.
     """
 
     expected_seq: int
@@ -187,6 +223,9 @@ class _Burst:
     objects: Sequence[ObjectBlock] = ()
     dropped: int = 0
     last_dropped_seq: int = 0
+    auth: _AuthFragment | None = None
+    key_status: KeyStatusMessage | None = None
+    challenged: bool = False
 
 
 @dataclass
@@ -240,6 +279,8 @@ class MasterRunner:
     # A timeout reports it, because "the link went silent" and "the outstation
     # answered something else" are different outstation faults.
     _last_rx: float | None = field(default=None, init=False, repr=False)
+    # Session keys in force while `MasterConfig.secure_auth` is set; None until set up.
+    _session_keys: SessionKeys | None = field(default=None, init=False, repr=False)
 
     @property
     def is_open(self) -> bool:
@@ -305,6 +346,11 @@ class MasterRunner:
 
             if self.link_reset is LinkResetPolicy.ON_OPEN:
                 await self._send_link_reset()
+            if self.master.config.secure_auth is not None:
+                # `_reassembler` is set, so other tasks can already use the runner; hold the channel
+                # or their requests would start a second key setup alongside this one.
+                async with self._claim():
+                    await self._change_session_keys()
         except BaseException:
             await self.close()
             raise
@@ -333,6 +379,7 @@ class MasterRunner:
                 self.channel = None
                 self._owns_channel = False
             self._reassembler = None
+            self._session_keys = None
             self._parser.reset()
             self._pending.clear()
 
@@ -462,8 +509,13 @@ class MasterRunner:
         """Send a request and consume its response burst; the caller holds the channel."""
         return (await self._exchange_burst(request)).fragments
 
-    async def _exchange_burst(self, request: RequestFragment) -> _Burst:
-        """`_exchange`, returning the whole burst."""
+    async def _exchange_burst(self, request: RequestFragment, *, rekey: bool = True) -> _Burst:
+        """`_exchange`, returning the whole burst. `rekey=False` skips key setup, which would renumber the request."""
+        # Key setup gets its own exchanges and deadlines, so the request keeps its full one. The
+        # request was numbered before them; renumber it so the outstation sees sequences in order.
+        if rekey and request.header.function not in _NO_KEY_SETUP and self._session_keys_due():
+            await self._change_session_keys()
+            request = _renumbered(request, self.master.next_request_sequence())
         # The deadline restarts on each solicited fragment, as opendnp3's
         # response timer does: a large burst over a slow link may take many
         # timeouts in total. MAX_BURST_FRAGMENTS bounds a peer that never stops.
@@ -480,6 +532,16 @@ class MasterRunner:
                 info = await self._next_solicited(burst, deadline)
             except ResponseTimeoutError as exc:
                 raise ResponseTimeoutError(self._timeout_message(burst)) from exc
+            if isinstance(info, _AuthFragment):
+                try:
+                    if await self._answer_auth(info, request, burst, deadline):
+                        return burst
+                except AuthenticationError:
+                    # The outstation may no longer hold our keys, after a restart or their expiry;
+                    # the next request sets up new ones first.
+                    self._session_keys = None
+                    raise
+                continue
             deadline = self._deadline(None)
             burst.fragments.append(info)
 
@@ -591,11 +653,13 @@ class MasterRunner:
         _require_operations(task)
         self._require_open()
         async with self._claim():
+            # Keys due now change before the SELECT: once it is sent, nothing may go out before the OPERATE.
+            await self._renew_due_session_keys()
             # Both built before the SELECT is sent: a request built meanwhile,
             # such as a poll waiting for the channel, would take n+1.
             select = self.master.build_select(task)
             operate = self.master.build_operate(OperateTask(operations=list(task.operations)))
-            result = await self._command(select)
+            result = await self._command(select, rekey=False)
             if not all(p.state is CommandPointState.SELECT_SUCCESS for p in result.points):
                 return result
             operated = await self._command(operate)
@@ -607,9 +671,9 @@ class MasterRunner:
             )
             return CommandTaskResult(points, operated.iin)
 
-    async def _command(self, request: RequestFragment) -> CommandTaskResult:
+    async def _command(self, request: RequestFragment, *, rekey: bool = True) -> CommandTaskResult:
         """Exchange a control request and match its echo; the caller holds the channel."""
-        burst = await self._exchange_burst(request)
+        burst = await self._exchange_burst(request, rekey=rekey)
         if len(burst.fragments) != 1:
             msg = f"Control response spanned {len(burst.fragments)} fragments; expected one"
             raise MasterRunnerError(msg)
@@ -654,6 +718,7 @@ class MasterRunner:
 
     async def _time_sync_non_lan(self) -> None:
         async with self._claim():
+            await self._renew_due_session_keys()
             sent_ms = self.wall_clock_ms()
             responses = await self._exchange(self.master.build_delay_measure())
             received_ms = self.wall_clock_ms()
@@ -667,12 +732,14 @@ class MasterRunner:
         async with self._claim():
             # Read the clock again rather than reuse `received_ms`: the write
             # must carry the time it leaves the master.
+            await self._renew_due_session_keys()
             write = self.master.build_write_time(DNP3Timestamp(self.wall_clock_ms() + delay_ms))
             responses = await self._exchange(write)
         _raise_if_rejected("WRITE of g50v1", responses)
 
     async def _time_sync_lan(self) -> None:
         async with self._claim():
+            await self._renew_due_session_keys()
             sent_ms = self.wall_clock_ms()
             responses = await self._exchange(self.master.build_record_current_time())
         if responses[-1].iin & IIN.NO_FUNC_CODE_SUPPORT:
@@ -739,6 +806,137 @@ class MasterRunner:
             msg = f"Outstation rejected {what}: {rejected.name}"
             raise RequestRejectedError(msg, iin=iin)
         return responses
+
+    # -- secure authentication ------------------------------------------------
+
+    async def _change_session_keys(self) -> None:
+        """Set up new session keys: a key status request, then a key change (IEEE 1815-2012 clause 7).
+
+        Raises:
+            SessionKeyError: The outstation did not take the new keys.
+            ResponseTimeoutError: The outstation did not answer.
+            LinkError: The link failed.
+        """
+        from dnp3.master import secauth
+
+        config = self.master.config.secure_auth
+        if config is None:
+            return
+        self._session_keys = None
+        try:
+            status_request = secauth.build_key_status_request(config.user_number, self.master.next_request_sequence())
+            status = await self._key_status(status_request)
+            change, keys = secauth.build_key_change(
+                config.update_key,
+                status,
+                user=config.user_number,
+                seq=self.master.next_request_sequence(),
+                now=asyncio.get_running_loop().time(),
+            )
+            secauth.check_key_change_reply(keys, change, await self._key_status(change))
+        except secauth.SecureAuthError as exc:
+            raise SessionKeyError(str(exc)) from exc
+        except AuthenticationError as exc:
+            raise SessionKeyError(str(exc), exc.code) from exc
+        self._session_keys = keys
+        logger.info("Session keys set for user %d", config.user_number)
+
+    async def _key_status(self, request: RequestFragment) -> KeyStatusMessage:
+        """Send a key status request or key change and return the key status that answers it."""
+        from dnp3.master import secauth
+
+        burst = await self._exchange_burst(request)
+        if burst.key_status is None:
+            iin = burst.fragments[-1].iin if burst.fragments else IIN(0)
+            msg = (
+                f"Outstation answered {request.header.function.name} without a key status (IIN {iin!r}); "
+                "is Secure Authentication enabled on it?"
+            )
+            raise secauth.SecureAuthError(msg)
+        return burst.key_status
+
+    async def _answer_auth(self, auth: _AuthFragment, request: RequestFragment, burst: _Burst, deadline: float) -> bool:
+        """Act on an authentication response received in place of a response.
+
+        Returns:
+            True when it ends the exchange, False when the response is still to come.
+
+        Raises:
+            AuthenticationError: The outstation reported an error, or the
+                response cannot be answered.
+        """
+        config = self.master.config.secure_auth
+        if config is None:
+            msg = (
+                "Outstation sent an authentication response; set MasterConfig.secure_auth to use Secure Authentication"
+            )
+            raise AuthenticationError(msg)
+        from dnp3.master import secauth
+
+        try:
+            message = secauth.decode(auth.objects)
+        except secauth.SecureAuthError as exc:
+            raise AuthenticationError(f"Malformed authentication response: {exc}") from exc
+        if isinstance(message, secauth.KeyStatusMessage):
+            if request.header.function != FunctionCode.AUTHENTICATE_REQUEST:
+                msg = f"Outstation answered {request.header.function.name} with a key status"
+                raise AuthenticationError(msg)
+            burst.key_status = message
+            return True
+        if isinstance(message, secauth.ErrorReport):
+            name = secauth.enum_name(secauth.AuthErrorCode, message.code)
+            raise AuthenticationError(f"Outstation reports authentication error {name}", message.code)
+        # A Challenge: reply with the MAC of the challenge and the request, on the
+        # request's sequence, then keep waiting for the request's own response.
+        if burst.challenged:
+            msg = "Outstation challenged the request again: it rejected the challenge reply"
+            raise AuthenticationError(msg)
+        if self._session_keys is None:
+            msg = "Outstation challenged a request before session keys were set up"
+            raise AuthenticationError(msg)
+        seq = request.header.control.seq
+        if burst.fragments:
+            # A challenge answers the request itself. Once a fragment has arrived this one is a later step
+            # of the burst; its sequence cannot tell, as sixteen fragments walk back to the request's.
+            msg = f"Outstation challenged in the middle of the response to request {seq}"
+            raise AuthenticationError(msg)
+        # The reply's MAC covers every octet of the challenge fragment, so the master
+        # signs only a fragment that is exactly its header and the one object it parsed.
+        if auth.data[4:] != b"".join(block.to_bytes() for block in auth.objects):  # 4: control, function, IIN
+            msg = "Malformed authentication response: bytes after its object"
+            raise AuthenticationError(msg)
+        try:
+            reply = secauth.build_challenge_reply(
+                self._session_keys,
+                message,
+                user=config.user_number,
+                challenge_fragment=auth.data,
+                request_fragment=request.to_bytes(),
+                seq=seq,
+            )
+        except secauth.SecureAuthError as exc:
+            raise AuthenticationError(str(exc)) from exc
+        burst.challenged = True
+        # The response comes back on the request's sequence, which `_check_sequence` moved past for the challenge.
+        burst.expected_seq = seq
+        await self._send(reply, deadline)
+        return False
+
+    async def _renew_due_session_keys(self) -> None:
+        """Change the session keys now if they are due, for a caller that reads the clock before sending.
+
+        Key setup takes round trips, so a time read before it would be stale when the request leaves.
+        """
+        if self._session_keys_due():
+            await self._change_session_keys()
+
+    def _session_keys_due(self) -> bool:
+        """Whether a request must wait for new session keys: none yet, or past the change interval."""
+        config = self.master.config.secure_auth
+        if config is None:
+            return False
+        keys = self._session_keys
+        return keys is None or asyncio.get_running_loop().time() - keys.set_at >= config.session_key_change_interval
 
     # -- unsolicited ----------------------------------------------------------
 
@@ -909,6 +1107,7 @@ class MasterRunner:
 
         Raises:
             LinkError: The link failed or delivered unusable bytes.
+            SessionKeyError: The outstation refused new session keys.
             MasterRunnerError: The channel is not open.
         """
         self._require_open()
@@ -930,7 +1129,7 @@ class MasterRunner:
 
             try:
                 await self.poll(task)
-            except LinkError:
+            except (LinkError, SessionKeyError):
                 raise
             except MasterRunnerError as exc:
                 logger.warning(
@@ -968,6 +1167,8 @@ class MasterRunner:
             RequestRejectedError: The outstation rejected a startup request.
                 Reconnecting would not change its configuration.
             TimeSyncError: The outstation rejected the startup time sync.
+            SessionKeyError: Session keys could not be set up. Reconnecting
+                would not change the update key.
         """
         stop = stop if stop is not None else asyncio.Event()
         delay = self.reconnect_min_delay
@@ -979,7 +1180,7 @@ class MasterRunner:
                     delay = self.reconnect_min_delay
                     await self.run_polls(stop=stop)
                     return
-                except (RequestRejectedError, TimeSyncError):
+                except (RequestRejectedError, TimeSyncError, SessionKeyError):
                     raise
                 except MasterRunnerError as exc:
                     delay = min(delay, self.reconnect_max_delay)
@@ -1009,7 +1210,7 @@ class MasterRunner:
                     await self.time_sync()
                 case _:
                     await self._request_accepted(self.master.build_enable_unsolicited(), "ENABLE_UNSOLICITED")
-        except LinkError:
+        except (LinkError, SessionKeyError):
             raise
         except (RequestRejectedError, TimeSyncError) as exc:
             logger.warning("%s refused, not repeated until the runner is reopened: %s", action.name, exc)
@@ -1066,7 +1267,7 @@ class MasterRunner:
 
     # -- protocol stack -------------------------------------------------------
 
-    async def _next_solicited(self, burst: _Burst, deadline: float) -> ResponseInfo:
+    async def _next_solicited(self, burst: _Burst, deadline: float) -> ResponseInfo | _AuthFragment:
         """Read until the next fragment of a solicited burst arrives.
 
         Unsolicited responses interleaved with a request are confirmed and
@@ -1078,7 +1279,8 @@ class MasterRunner:
             deadline: Event-loop time the next fragment must arrive by.
 
         Returns:
-            Info for the next solicited fragment.
+            Info for the next solicited fragment, or the authentication
+            response the outstation sent in its place.
 
         Raises:
             ResponseTimeoutError: No fragment arrived before the deadline.
@@ -1087,6 +1289,9 @@ class MasterRunner:
         """
         while True:
             info = await self._receive_fragment(deadline, burst=burst)
+            if burst.auth is not None:
+                auth, burst.auth = burst.auth, None
+                return auth
             if info is None or info.is_unsolicited:
                 continue
             return info
@@ -1286,6 +1491,13 @@ class MasterRunner:
                 exc,
                 data.hex(" "),
             )
+            return None
+        control = response.header.control
+        if burst is not None and response.header.function == FunctionCode.AUTHENTICATE_RESPONSE and not control.uns:
+            # Clause 7: the outstation answers a request it will not yet act on with an
+            # authentication response. It carries no values and its bytes feed the reply's MAC.
+            # `_screen_solicited` has already matched its sequence to the burst.
+            burst.auth = _AuthFragment(data=data, objects=response.objects)
             return None
         info = self.master.process_fragment(response)
         if burst is not None and not info.is_unsolicited:
@@ -1568,6 +1780,16 @@ class MasterRunner:
 
 def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" if number == 1 else f"{number} {noun}s"
+
+
+# Requests that never wait for key setup: key setup's own, and an OPERATE, which must be the next request after its
+# SELECT with the SELECT's sequence + 1 (IEEE 1815-2012 4.4.4.3). `select_and_operate` sets up due keys first.
+_NO_KEY_SETUP = (FunctionCode.AUTHENTICATE_REQUEST, FunctionCode.OPERATE)
+
+
+def _renumbered(request: RequestFragment, seq: int) -> RequestFragment:
+    control = replace(request.header.control, seq=seq)
+    return replace(request, header=replace(request.header, control=control))
 
 
 def _require_operations(task: DirectOperateTask | SelectTask) -> None:

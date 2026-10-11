@@ -67,6 +67,9 @@ class FunctionCode(IntEnum):
     AUTHENTICATE_FILE = 0x1D
     ABORT_FILE = 0x1E
 
+    # Secure Authentication (IEEE 1815-2012 clause 7)
+    AUTHENTICATE_REQUEST = 0x20
+
     # Response codes (0x81+)
     RESPONSE = 0x81
     UNSOLICITED_RESPONSE = 0x82

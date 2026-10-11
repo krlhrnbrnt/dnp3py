@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Pure Python implementation of the DNP3 protocol (IEEE 1815-2012). Zero C/C++ dependencies.
+Pure Python implementation of the DNP3 protocol (IEEE 1815-2012). Zero C/C++ dependencies in the core; the optional `secauth` extra (Secure Authentication) uses `cryptography`.
 Async I/O via asyncio, strict type annotations, Level 2 subset for SCADA/RTU applications.
 
 - **Owner:** craig8 (GitHub)

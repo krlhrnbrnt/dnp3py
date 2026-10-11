@@ -343,3 +343,8 @@ def test_exactly_one_control_code_symbol() -> None:
     assert "dnp3.objects.binary_output" in found
     distinct = {id(cls) for cls in found.values()}
     assert len(distinct) == 1, f"ControlCode resolves to {len(distinct)} classes: {found}"
+
+
+def test_authenticate_request_function_code() -> None:
+    assert FunctionCode(0x20) is FunctionCode.AUTHENTICATE_REQUEST
+    assert not FunctionCode.AUTHENTICATE_REQUEST.is_response()

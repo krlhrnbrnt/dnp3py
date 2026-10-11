@@ -28,6 +28,11 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.optional-dependencies]
+secauth = [
+    "cryptography>=44",
+]
+
 [dependency-groups]
 # Installed by default with `uv sync`. ruff is pinned to match .pre-commit-config.yaml;
 # update both together.
@@ -39,6 +44,7 @@ dev = [
     "mypy>=1.8",
     "ruff==0.15.18",
     "pre-commit>=4.0",
+    "cryptography>=44",
 ]
 
 [tool.hatch.version]

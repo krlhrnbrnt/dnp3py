@@ -31,3 +31,13 @@ def test_exports() -> None:
     assert dnp3.master.MasterRunner is MasterRunner
     assert dnp3.master.MasterUdpRunner is MasterUdpRunner
     assert MasterUdpRunner(master=Master()).link_reset is LinkResetPolicy.NEVER
+
+
+def test_secure_auth_exports() -> None:
+    import dnp3.master
+    from dnp3.master.runner import AuthenticationError, MasterRunnerError, SessionKeyError
+
+    assert dnp3.master.AuthenticationError is AuthenticationError
+    assert dnp3.master.SessionKeyError is SessionKeyError
+    assert issubclass(SessionKeyError, AuthenticationError)
+    assert issubclass(AuthenticationError, MasterRunnerError)

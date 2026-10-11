@@ -11,7 +11,10 @@ MESA IEEE 1815.2 DER outstation simulator introduced in v0.2.0.
 
 ## Features
 
-- **Pure Python** - No C/C++ dependencies, works anywhere Python runs
+- **Pure Python** - No C/C++ dependencies, works anywhere Python runs. The optional
+  Secure Authentication extra uses `cryptography`
+- **Secure Authentication** - the master answers SAv5 challenges (IEEE 1815-2012
+  clause 7); see [Secure Authentication](#secure-authentication)
 - **Level 2 object model** - targets the IEEE 1815-2012 clause 14.4 (Table 14-3)
   subset for RTU-class SCADA use; see [Protocol Conformance](#protocol-conformance)
   for the request rows not yet implemented
@@ -34,6 +37,41 @@ Or with [uv](https://docs.astral.sh/uv/):
 ```bash
 uv add dnp3py
 ```
+
+## Secure Authentication
+
+An outstation with Secure Authentication version 5 (IEEE 1815-2012 clause 7)
+refuses critical requests, such as controls, time syncs and file operations,
+until the master proves it holds the session keys. Install the extra:
+
+```bash
+pip install "dnp3py[secauth]"
+```
+
+and give the master the update key the outstation is configured with:
+
+```python
+from dnp3.master import Master, MasterConfig, MasterTcpRunner, SecureAuthConfig
+
+config = MasterConfig(
+    outstation_address=10,
+    secure_auth=SecureAuthConfig(update_key=bytes.fromhex("00112233445566778899aabbccddeeff")),
+)
+runner = MasterTcpRunner(master=Master(config=config), host="192.0.2.10", port=20000)
+```
+
+The runner sets up session keys when it opens, renews them every
+`session_key_change_interval` seconds (10 minutes by default) and answers each
+challenge. A 16-octet update key means AES-128 key wrap, 32 octets AES-256.
+
+- `AuthenticationError`: the outstation refused a request. The request is not
+  resent; the next one sets up new session keys first.
+- `SessionKeyError`: session keys could not be set up, usually a wrong update
+  key or an outstation without Secure Authentication. `run()` raises it rather
+  than reconnecting.
+
+Not supported: aggressive mode, remote update key change, user management, and
+authenticating the outstation's own responses.
 
 ## Quick Start
 

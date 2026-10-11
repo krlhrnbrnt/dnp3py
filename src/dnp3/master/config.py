@@ -11,6 +11,8 @@ from enum import Enum, auto
 MAX_MASTER_ADDRESS = 65519  # 0xFFEF - addresses 0xFFF0-0xFFFF reserved
 MAX_OUTSTATION_ADDRESS = 65535  # 0xFFFF - can be any 16-bit value
 MIN_FRAGMENT_SIZE = 249  # Minimum required by spec
+MAX_USER_NUMBER = 65535
+_AES_KEY_LENGTHS = (16, 32)
 
 
 class TimeSyncMethod(Enum):
@@ -44,6 +46,37 @@ class PollingConfig:
 
 
 @dataclass(frozen=True)
+class SecureAuthConfig:
+    """Secure Authentication version 5 settings (IEEE 1815-2012 clause 7).
+
+    Attributes:
+        update_key: The user's pre-shared update key. 16 octets for AES-128
+            key wrap, 32 for AES-256; the outstation must be configured with
+            the same key and algorithm.
+        user_number: The user the master acts as. 1 is the spec's default user.
+        session_key_change_interval: Seconds between session key changes.
+            opendnp3 uses 10 minutes, 5 inside the spec's default 15-minute
+            session key expiry.
+    """
+
+    update_key: bytes = field(repr=False)
+    user_number: int = 1
+    session_key_change_interval: float = 600.0
+
+    def __post_init__(self) -> None:
+        """Validate configuration values."""
+        if len(self.update_key) not in _AES_KEY_LENGTHS:
+            msg = f"Update key must be 16 or 32 octets, got {len(self.update_key)}"
+            raise ValueError(msg)
+        if not 1 <= self.user_number <= MAX_USER_NUMBER:
+            msg = f"User number must be 1-{MAX_USER_NUMBER}, got {self.user_number}"
+            raise ValueError(msg)
+        if not self.session_key_change_interval > 0:
+            msg = f"Session key change interval must be > 0, got {self.session_key_change_interval}"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True)
 class MasterConfig:
     """Master station configuration.
 
@@ -68,6 +101,8 @@ class MasterConfig:
             recover the current values of points whose events were lost.
         time_sync_on_need_time: When a response carries IIN1.4 NEED_TIME,
             `run_polls()` runs `time_sync()`.
+        secure_auth: Secure Authentication settings, or None for an outstation
+            without it. Needs the `secauth` extra.
         polling: Polling configuration.
     """
 
@@ -85,6 +120,7 @@ class MasterConfig:
     react_to_restart: bool = True
     integrity_on_event_overflow: bool = True
     time_sync_on_need_time: bool = False
+    secure_auth: SecureAuthConfig | None = None
     polling: PollingConfig = field(default_factory=PollingConfig)
 
     def __post_init__(self) -> None:

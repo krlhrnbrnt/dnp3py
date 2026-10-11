@@ -14,7 +14,7 @@ from dnp3.master.commands import (
     OperateTask,
     SelectTask,
 )
-from dnp3.master.config import MasterConfig, PollingConfig, TimeSyncMethod
+from dnp3.master.config import MasterConfig, PollingConfig, SecureAuthConfig, TimeSyncMethod
 from dnp3.master.double_bit import DoubleBitInputHandler, DoubleBitValue
 from dnp3.master.handler import (
     CommandPointResult,
@@ -36,12 +36,14 @@ from dnp3.master.polling import (
     RangePollTask,
 )
 from dnp3.master.runner import (
+    AuthenticationError,
     LinkError,
     LinkResetPolicy,
     MasterRunner,
     MasterRunnerError,
     RequestRejectedError,
     ResponseTimeoutError,
+    SessionKeyError,
     TimeSyncError,
 )
 from dnp3.master.state import MasterState, MasterStateManager
@@ -51,6 +53,7 @@ from dnp3.master.udp_runner import MasterUdpRunner
 
 __all__ = [
     "AnalogOutputVariation",
+    "AuthenticationError",
     "ClassPollTask",
     "CommandBuilder",
     "CommandPointResult",
@@ -86,7 +89,9 @@ __all__ = [
     "ResponseHandler",
     "ResponseTimeoutError",
     "SOEHandler",
+    "SecureAuthConfig",
     "SelectTask",
+    "SessionKeyError",
     "SyncMaster",
     "TimeSyncError",
     "TimeSyncMethod",
