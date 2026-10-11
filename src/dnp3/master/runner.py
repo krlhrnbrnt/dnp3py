@@ -934,7 +934,8 @@ class MasterRunner:
         was down, losing its unsolicited reporting state.
 
         `run()` opens and closes the runner itself, closing it on every exit,
-        including cancellation. Calls such as `direct_operate()` made while the
+        including cancellation. An injected channel is closed and reopened on
+        each reconnect, but left open on exit. Calls such as `direct_operate()` made while the
         link is down raise `MasterRunnerError` rather than wait.
 
         Args:
@@ -963,6 +964,11 @@ class MasterRunner:
                     delay = min(delay, self.reconnect_max_delay)
                     logger.warning("Outstation link down, reconnecting in %g s: %s", delay, exc)
                     await self.close()
+                    # `close()` leaves an injected channel open, and a TCP channel
+                    # still reports itself open after the peer's EOF. Close it so
+                    # the next `open()` redials rather than reusing the dead link.
+                    if self.channel is not None:
+                        await self.channel.close()
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(stop.wait(), delay)
                     delay *= 2

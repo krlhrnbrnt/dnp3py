@@ -44,6 +44,21 @@ class RefusingChannel(SimulatorChannel):
 
 
 @dataclass
+class RedialingChannel(SimulatorChannel):
+    """A channel that connects to the next peer on each open(), as TcpClientChannel redials.
+
+    Like a TCP channel, it still reports itself open after the peer closes.
+    """
+
+    peers: list[SimulatorChannel] = field(default_factory=list)
+
+    async def open(self) -> None:
+        if not self.is_open:
+            self.connect_to(self.peers.pop(0))
+        await super().open()
+
+
+@dataclass
 class ScriptedRunner(MasterRunner):
     """A runner that takes each connection's channel from a script."""
 
@@ -152,6 +167,30 @@ class TestRun:
 
         assert logged_delays(caplog) == [MIN_DELAY, MIN_DELAY]
         assert [FunctionCode(r[1]) for r in requests] == [FunctionCode.READ, FunctionCode.ENABLE_UNSOLICITED]
+
+    async def test_reopens_an_injected_channel_after_the_peer_closes(self) -> None:
+        """An injected channel still reporting itself open must be closed and redialed, not reused."""
+        first_peer = FakeOutstation(SimulatorChannel())
+        second_peer = FakeOutstation(SimulatorChannel())
+        await open_peer(first_peer)
+        await open_peer(second_peer)
+        channel = RedialingChannel(peers=[first_peer.channel, second_peer.channel])  # type: ignore[list-item]
+        runner = make_runner()
+        runner.channel = channel
+        stop = asyncio.Event()
+
+        async def first_connection() -> None:
+            await answer_requests(first_peer, 2)
+            await first_peer.channel.close()  # type: ignore[attr-defined]
+
+        dropped = asyncio.create_task(first_connection())
+        responder = asyncio.create_task(stop_after_startup(second_peer, stop))
+        await asyncio.wait_for(runner.run(stop=stop), timeout=2.0)
+        await dropped
+        requests = await responder
+
+        assert [FunctionCode(r[1]) for r in requests] == [FunctionCode.READ, FunctionCode.ENABLE_UNSOLICITED]
+        assert runner.channel is channel
 
     async def test_stop_ends_the_wait_between_attempts(self) -> None:
         runner = make_runner(RefusingChannel())
