@@ -28,7 +28,7 @@ from dnp3.master import (
 )
 from dnp3.master.runner import LinkResetPolicy
 from dnp3.transport_io.channel import Channel, ChannelError
-from dnp3.transport_io.simulator import SimulatorChannel
+from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
 
 # Each wrapped method, with arguments it must hand the runner unchanged.
 CALLS: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = [
@@ -50,7 +50,9 @@ CALLS: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = [
 
 @pytest.fixture
 def runner() -> Any:
-    return create_autospec(MasterRunner, instance=True)
+    runner = create_autospec(MasterRunner, instance=True)
+    runner.channel = None
+    return runner
 
 
 @pytest.fixture
@@ -173,6 +175,17 @@ def test_reopen_after_connection_reset() -> None:
         sync.open()
 
         assert runner.is_open
+
+
+def test_close_closes_an_injected_channel() -> None:
+    channel, _peer = create_channel_pair()
+    master = Master(config=MasterConfig(address=3, outstation_address=1), handler=DefaultSOEHandler())
+    runner = MasterRunner(master=master, channel=channel, link_reset=LinkResetPolicy.NEVER, response_timeout=1.0)
+
+    with SyncMaster(runner):
+        assert channel.is_open
+
+    assert not channel.is_open
 
 
 async def test_inside_running_loop_raises_without_creating_coroutine(runner: Any) -> None:

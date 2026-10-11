@@ -75,20 +75,31 @@ class SyncMaster:
         return await self.runner.open()
 
     def close(self) -> None:
-        """Close the runner and the event loop.
+        """Close the runner, its channel and the event loop.
 
         Final: the runner's asyncio primitives are bound to this loop, so no
         other loop can drive it, and every later call raises `RuntimeError`.
         A second `close()` does nothing.
+
+        Unlike `MasterRunner.close()`, this closes an injected channel too: its
+        transport was opened on this private loop, and once the loop is closed
+        nothing can close it.
         """
         if self._closed:
             return
         self._check_usable()
         try:
-            self._loop.run(self.runner.close())
+            self._loop.run(self._close_all())
         finally:
             self._closed = True
             self._loop.close()
+
+    async def _close_all(self) -> None:
+        try:
+            await self.runner.close()
+        finally:
+            if self.runner.channel is not None:
+                await self.runner.channel.close()
 
     def __enter__(self) -> Self:
         self.open()
