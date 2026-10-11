@@ -194,6 +194,11 @@ class ResponseInfo:
         con: True if the outstation requested a CONFIRM for this fragment.
         truncation: Set when the object data was cut short. Values from the
             blocks before the stopping block are delivered; none from it or after.
+            `MasterRunner` does not CONFIRM such a fragment, since a CONFIRM lets
+            the outstation discard its events. The outstation reports them again,
+            so the values before the cut are delivered again. A cut that recurs
+            every time, such as an unsupported variation, leaves those events
+            unconfirmed for good and the outstation's event buffer cannot drain.
         relative_time_without_cto: Relative-time event objects in this fragment
             delivered with no timestamp, because no usable common time of
             occurrence (group 51) preceded them in the fragment or because

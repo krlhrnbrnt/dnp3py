@@ -168,6 +168,8 @@ class TestTruncationIsLogged:
         message = warnings[0].getMessage()
         for part in ("data_shorter_than_declared", "offset 6", "group 30", "variation 1", "qualifier 0x17"):
             assert part in message
+        assert "not confirmed" in message
+        assert "event buffer" in message
 
     def test_complete_response_logs_nothing(self, caplog: pytest.LogCaptureFixture) -> None:
         matching = bytes([0x1E, 0x01, 0x17, 0x01, 0x05, 0x01, 0x64, 0x00, 0x00, 0x00])

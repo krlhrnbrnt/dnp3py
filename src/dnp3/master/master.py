@@ -1002,7 +1002,9 @@ class Master:
             qualifier = "None" if truncation.qualifier is None else f"0x{truncation.qualifier:02X}"
             logger.warning(
                 "Response fragment seq=%d unsolicited=%s cut short (%s) at object offset %d: "
-                "group %s, variation %s, qualifier %s; no value from that block onward was delivered",
+                "group %s, variation %s, qualifier %s; no value from that block onward was delivered. "
+                "The fragment is not confirmed, so the outstation resends it; if every resend is cut "
+                "the same way, its event buffer cannot drain",
                 info.sequence,
                 info.is_unsolicited,
                 truncation.reason.value,
