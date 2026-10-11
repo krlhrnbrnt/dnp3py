@@ -266,6 +266,17 @@ class TestRangePollTask:
 
         assert fragment.header.function == FunctionCode.READ
 
+    @pytest.mark.parametrize(
+        ("start", "stop"),
+        [(20, 10), (-1, 10), (0, -1), (0, 0x1_0000_0000)],
+    )
+    def test_rejects_invalid_range(self, start: int, stop: int) -> None:
+        with pytest.raises(ValueError, match="Range poll"):
+            RangePollTask(group=30, variation=1, start=start, stop=stop)
+
+    def test_accepts_full_uint32_range(self) -> None:
+        RangePollTask(group=30, variation=1, start=0, stop=0xFFFFFFFF)
+
 
 class TestPollScheduler:
     """Tests for PollScheduler."""

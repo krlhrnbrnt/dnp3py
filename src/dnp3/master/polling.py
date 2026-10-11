@@ -20,6 +20,7 @@ from dnp3.application.qualifiers import ObjectHeader, RangeCode, StartStopRange
 # Range size limits for qualifier selection
 MAX_UINT8_RANGE = 255
 MAX_UINT16_RANGE = 65535
+MAX_UINT32_RANGE = 0xFFFFFFFF
 
 
 class PollType(Enum):
@@ -142,6 +143,11 @@ class RangePollTask(PollTask):
         variation: Object variation.
         start: Start index.
         stop: Stop index.
+
+    Raises:
+        ValueError: The range is not ``0 <= start <= stop <= 0xFFFFFFFF``.
+            A start-stop range must not run backwards, and its widest
+            qualifier carries 32-bit indexes (IEEE 1815-2012 4.2.2.7.3.3).
     """
 
     group: int = 1
@@ -149,6 +155,10 @@ class RangePollTask(PollTask):
     start: int = 0
     stop: int = 0
     poll_type: PollType = field(default=PollType.RANGE, init=False)
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.start <= self.stop <= MAX_UINT32_RANGE:
+            raise ValueError(f"Range poll needs 0 <= start <= stop <= 0xFFFFFFFF, got {self.start}..{self.stop}")
 
     def build_request(self, seq: int = 0) -> RequestFragment:
         """Build range poll request."""
