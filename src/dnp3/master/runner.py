@@ -431,8 +431,8 @@ class MasterRunner:
             Info for each fragment of the burst, in arrival order.
 
         Raises:
-            ResponseTimeoutError: No fragment arrived before the deadline, or
-                the burst as a whole outran `response_timeout`.
+            ResponseTimeoutError: No fragment arrived within `response_timeout`
+                of the request or of the previous fragment.
             LinkError: The link failed, a write did not complete before the
                 deadline, or the link delivered unusable bytes.
             MasterRunnerError: The channel is not open, a fragment broke the
@@ -449,9 +449,9 @@ class MasterRunner:
 
     async def _exchange_burst(self, request: RequestFragment) -> _Burst:
         """`_exchange`, returning the whole burst."""
-        # One deadline for the whole exchange, writes included, not one per
-        # fragment: a per fragment deadline lets a peer that answers slowly but
-        # steadily hold the request open indefinitely.
+        # The deadline restarts on each solicited fragment, as opendnp3's
+        # response timer does: a large burst over a slow link may take many
+        # timeouts in total. MAX_BURST_FRAGMENTS bounds a peer that never stops.
         deadline = self._deadline(None)
         await self._send(request, deadline)
 
@@ -465,6 +465,7 @@ class MasterRunner:
                 info = await self._next_solicited(burst, deadline)
             except ResponseTimeoutError as exc:
                 raise ResponseTimeoutError(self._timeout_message(burst)) from exc
+            deadline = self._deadline(None)
             burst.fragments.append(info)
 
             if info.con:
@@ -1028,7 +1029,7 @@ class MasterRunner:
 
         Args:
             burst: Burst being accumulated, for sequence continuity.
-            deadline: Event-loop time the whole exchange must finish by.
+            deadline: Event-loop time the next fragment must arrive by.
 
         Returns:
             Info for the next solicited fragment.

@@ -1667,42 +1667,40 @@ class TestBurstBounds:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await responder
 
-    async def test_total_deadline_bounds_a_slow_burst(self) -> None:
-        """`response_timeout` bounds the exchange, not merely each fragment.
+    async def test_each_fragment_restarts_the_response_timeout(self) -> None:
+        """A burst longer than `response_timeout` completes while no gap exceeds it.
 
-        A peer answering steadily but slowly would otherwise hold a request open
-        for as long as it kept talking, since a per-fragment deadline resets on
-        every arrival.
+        A large response over a slow link can take many timeouts in total while
+        the outstation never goes quiet.
         """
         channel_a, channel_b = create_channel_pair()
         await channel_a.open()
         await channel_b.open()
-        runner, _ = make_runner(channel_a, response_timeout=0.6)
+        runner, _ = make_runner(channel_a, response_timeout=0.4)
         await runner.open()
         peer = FakeOutstation(channel_b)
+        count = 6
 
         async def respond_slowly() -> None:
             seq = await peer.read_request_seq()
-            with contextlib.suppress(Exception):
-                while True:
-                    await peer.send_fragment(
-                        analog_response(seq=seq, fir=True, fin=False, con=True, index=0, value=1.0)
-                    )
+            for i in range(count):
+                await asyncio.sleep(0.2)
+                fin = i == count - 1
+                await peer.send_fragment(
+                    analog_response(seq=seq, fir=i == 0, fin=fin, con=not fin, index=i, value=float(i))
+                )
+                if not fin:
                     await peer.read_fragments(1)
-                    await asyncio.sleep(0.15)
-                    seq = (seq + 1) % 16
+                seq = (seq + 1) % 16
 
         responder = asyncio.create_task(respond_slowly())
-        started = asyncio.get_running_loop().time()
         try:
-            with pytest.raises(ResponseTimeoutError):
-                await runner.integrity_poll()
+            infos = await runner.integrity_poll()
         finally:
             responder.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 await responder
-        elapsed = asyncio.get_running_loop().time() - started
-        assert elapsed < 3.0, "the exchange must be bounded by response_timeout, not per fragment"
+        assert len(infos) == count
 
 
 class TestErrorContainment:
@@ -2186,7 +2184,11 @@ class TestSpentDeadline:
         assert await peer.read_fragments(1) == [bytes([0xD5, FunctionCode.CONFIRM.value])]
 
     async def test_confirm_owed_after_the_deadline_is_still_written(self) -> None:
-        """Values delivered as the deadline passes are confirmed; the next fragment is not taken."""
+        """Values delivered as the deadline passes are confirmed; the next fragment is not taken.
+
+        The fragment is unsolicited: only a solicited fragment restarts the
+        exchange's response timeout.
+        """
         channel_a, channel_b = create_channel_pair()
         await channel_a.open()
         await channel_b.open()
@@ -2206,22 +2208,18 @@ class TestSpentDeadline:
         async def respond() -> None:
             seq = await peer.read_request_seq()
             await peer.send_raw(
-                peer.frame_fragment(analog_response(seq=seq, fir=True, fin=False, con=True, index=0, value=1.0))
-                + peer.frame_fragment(
-                    analog_response(seq=(seq + 1) % 16, fir=False, fin=True, con=False, index=1, value=2.0)
-                )
+                peer.frame_fragment(self._unsolicited(4, index=0, value=1.0))
+                + peer.frame_fragment(analog_response(seq=seq, fir=True, fin=True, con=False, index=1, value=2.0))
             )
             confirms.extend(await peer.read_fragments(1))
-            seq_holder.append(seq)
 
-        seq_holder: list[int] = []
         responder = asyncio.create_task(respond())
         with pytest.raises(ResponseTimeoutError, match="No response to READ"):
             await runner.integrity_poll()
         await responder
 
         assert handler.analog_inputs == {0: pytest.approx(1.0)}
-        assert confirms == [bytes([0xC0 | seq_holder[0], FunctionCode.CONFIRM.value])]
+        assert confirms == [bytes([0xD4, FunctionCode.CONFIRM.value])]
         assert runner.is_open is True
 
 
