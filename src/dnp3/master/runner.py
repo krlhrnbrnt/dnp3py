@@ -42,7 +42,7 @@ from dnp3.datalink.parser import FrameParser
 from dnp3.master import file_transfer
 from dnp3.master.command_status import command_point_results
 from dnp3.master.commands import DirectOperateTask, OperateTask, SelectTask
-from dnp3.master.config import TimeSyncMethod
+from dnp3.master.config import SecureAuthConfig, TimeSyncMethod
 from dnp3.master.file_transfer import FileStatus
 from dnp3.master.handler import CommandPointState, CommandTaskResult, ResponseInfo
 from dnp3.master.master import IINAction, Master, propagation_delay_ms
@@ -196,8 +196,8 @@ class AuthenticationError(MasterRunnerError):
 class SessionKeyError(AuthenticationError):
     """Raised when session keys cannot be set up.
 
-    Usually a wrong update key or an outstation without Secure Authentication,
-    neither of which reconnecting fixes.
+    On the first key setup, usually a wrong update key or an outstation without
+    Secure Authentication, neither of which reconnecting fixes.
     """
 
 
@@ -381,11 +381,11 @@ class MasterRunner:
 
             if self.link_reset is LinkResetPolicy.ON_OPEN:
                 await self._send_link_reset()
-            if self.master.config.secure_auth is not None:
+            if (secure_auth := self.master.config.secure_auth) is not None:
                 # `_reassembler` is set, so other tasks can already use the runner; hold the channel
                 # or their requests would start a second key setup alongside this one.
                 async with self._claim():
-                    await self._change_session_keys()
+                    await self._change_session_keys(secure_auth)
         except BaseException:
             await self.close()
             raise
@@ -548,8 +548,7 @@ class MasterRunner:
         """`_exchange`, returning the whole burst. `rekey=False` skips key setup, which would renumber the request."""
         # Key setup gets its own exchanges and deadlines, so the request keeps its full one. The
         # request was numbered before them; renumber it so the outstation sees sequences in order.
-        if rekey and request.header.function not in _NO_KEY_SETUP and self._session_keys_due():
-            await self._change_session_keys()
+        if rekey and request.header.function not in _NO_KEY_SETUP and await self._renew_due_session_keys():
             request = _renumbered(request, self.master.next_request_sequence())
         # The deadline restarts on each solicited fragment, as opendnp3's
         # response timer does: a large burst over a slow link may take many
@@ -568,14 +567,8 @@ class MasterRunner:
             except ResponseTimeoutError as exc:
                 raise ResponseTimeoutError(self._timeout_message(burst)) from exc
             if isinstance(info, _AuthFragment):
-                try:
-                    if await self._answer_auth(info, request, burst, deadline):
-                        return burst
-                except AuthenticationError:
-                    # The outstation may no longer hold our keys, after a restart or their expiry;
-                    # the next request sets up new ones first.
-                    self._session_keys = None
-                    raise
+                if await self._answer_auth(info, request, burst, deadline):
+                    return burst
                 continue
             deadline = self._deadline(None)
             burst.fragments.append(info)
@@ -866,7 +859,8 @@ class MasterRunner:
 
         Raises:
             ValueError: `name` is empty, not ASCII or too long for one request
-                fragment, or `permissions` does not fit 16 bits. Nothing is sent.
+                fragment, `permissions` does not fit 16 bits, or `data` is 4 GiB
+                or more. Nothing is sent.
             FileTransferError: The outstation refused a step, or answered one
                 with a missing, malformed or mismatched status object.
             RequestRejectedError: The outstation rejected a request through its IIN.
@@ -988,7 +982,7 @@ class MasterRunner:
 
     # -- secure authentication ------------------------------------------------
 
-    async def _change_session_keys(self) -> None:
+    async def _change_session_keys(self, config: SecureAuthConfig) -> None:
         """Set up new session keys: a key status request, then a key change (IEEE 1815-2012 clause 7).
 
         Raises:
@@ -998,9 +992,6 @@ class MasterRunner:
         """
         from dnp3.master import secauth
 
-        config = self.master.config.secure_auth
-        if config is None:
-            return
         self._session_keys = None
         try:
             status_request = secauth.build_key_status_request(config.user_number, self.master.next_request_sequence())
@@ -1062,12 +1053,17 @@ class MasterRunner:
                 raise AuthenticationError(msg)
             burst.key_status = message
             return True
+        # An error report or a rejected challenge reply may mean the outstation no longer holds our keys,
+        # after a restart or their expiry, so the next request sets up new ones first. Faults the master
+        # finds on its own keep the keys: changing them would not help.
         if isinstance(message, secauth.ErrorReport):
+            self._session_keys = None
             name = secauth.enum_name(secauth.AuthErrorCode, message.code)
             raise AuthenticationError(f"Outstation reports authentication error {name}", message.code)
         # A Challenge: reply with the MAC of the challenge and the request, on the
         # request's sequence, then keep waiting for the request's own response.
         if burst.challenged:
+            self._session_keys = None
             msg = "Outstation challenged the request again: it rejected the challenge reply"
             raise AuthenticationError(msg)
         if self._session_keys is None:
@@ -1101,21 +1097,20 @@ class MasterRunner:
         await self._send(reply, deadline)
         return False
 
-    async def _renew_due_session_keys(self) -> None:
-        """Change the session keys now if they are due, for a caller that reads the clock before sending.
+    async def _renew_due_session_keys(self) -> bool:
+        """Change the session keys if they are due: none yet, or past the change interval. Returns whether it did.
 
-        Key setup takes round trips, so a time read before it would be stale when the request leaves.
+        A caller that reads the clock before sending calls this first: key setup takes round trips, so a
+        time read before it would be stale when the request leaves.
         """
-        if self._session_keys_due():
-            await self._change_session_keys()
-
-    def _session_keys_due(self) -> bool:
-        """Whether a request must wait for new session keys: none yet, or past the change interval."""
         config = self.master.config.secure_auth
         if config is None:
             return False
         keys = self._session_keys
-        return keys is None or asyncio.get_running_loop().time() - keys.set_at >= config.session_key_change_interval
+        if keys is not None and asyncio.get_running_loop().time() - keys.set_at < config.session_key_change_interval:
+            return False
+        await self._change_session_keys(config)
+        return True
 
     # -- unsolicited ----------------------------------------------------------
 
@@ -1346,22 +1341,30 @@ class MasterRunner:
             RequestRejectedError: The outstation rejected a startup request.
                 Reconnecting would not change its configuration.
             TimeSyncError: The outstation rejected the startup time sync.
-            SessionKeyError: Session keys could not be set up. Reconnecting
-                would not change the update key.
+            SessionKeyError: Session keys could not be set up on the first
+                connection. Reconnecting would not change the update key.
+                Once the outstation has taken keys, a failed key change
+                reconnects like a failed link.
         """
         stop = stop if stop is not None else asyncio.Event()
         delay = self.reconnect_min_delay
+        opened = False
         try:
             while not stop.is_set():
                 try:
                     await self.open()
+                    opened = True
                     await self.startup()
                     delay = self.reconnect_min_delay
                     await self.run_polls(stop=stop)
                     return
-                except (RequestRejectedError, TimeSyncError, SessionKeyError):
+                except (RequestRejectedError, TimeSyncError):
                     raise
                 except MasterRunnerError as exc:
+                    # Keys the outstation took once can fail to change after its restart or a transient
+                    # g120v7 error; stopping for good on one would leave the outstation unpolled.
+                    if isinstance(exc, SessionKeyError) and not opened:
+                        raise
                     delay = min(delay, self.reconnect_max_delay)
                     logger.warning("Outstation link down, reconnecting in %g s: %s", delay, exc)
                     await self.close()

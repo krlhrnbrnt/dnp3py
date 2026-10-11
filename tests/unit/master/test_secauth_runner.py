@@ -28,8 +28,9 @@ from dnp3.master.master import IINAction
 from dnp3.master.polling import IntegrityPollTask
 from dnp3.master.runner import AuthenticationError, SessionKeyError
 from dnp3.master.tcp_runner import MasterTcpRunner
-from dnp3.transport_io.simulator import create_channel_pair
+from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
 from tests.unit.master.test_file_runner import status_reply
+from tests.unit.master.test_reconnect import RedialingChannel
 from tests.unit.master.test_tcp_runner import (
     FakeOutstation,
     RecordingHandler,
@@ -47,6 +48,7 @@ USER = 1
 SHA256_16 = 4
 AES_128, AES_256 = 1, 2
 OK, NOT_INIT, AUTH_FAIL = 1, 2, 4
+AUTHENTICATION_FAILED, MAX_SESSION_KEY_STATUS_REQUESTS_EXCEEDED = 1, 12  # g120v7 error codes
 
 
 def g120(variation: int, obj: bytes) -> ObjectBlock:
@@ -249,6 +251,35 @@ class TestSessionKeys:
             await asyncio.wait_for(runner.run(), timeout=5.0)
         await serve
 
+    async def test_run_reconnects_when_renewal_fails(self) -> None:
+        """Keys the outstation once took can fail to renew, after its restart or a transient fault; that is retried."""
+        peers = [SimulatorChannel(), SimulatorChannel()]
+        for peer in peers:
+            await peer.open()
+        runner, _ = make_runner(
+            RedialingChannel(peers=list(peers)),
+            secure_auth=SecureAuthConfig(update_key=UPDATE_KEY),
+            startup_integrity_poll=False,
+            enable_unsolicited_on_startup=False,
+            poll_retry_delay=0.01,
+        )
+        runner.reconnect_min_delay = 0.01
+        runner.master.scheduler.clear()
+        runner.master.scheduler.add_task(IntegrityPollTask(interval=3600.0))
+        first, second = (SaPeer(FakeOutstation(peer)) for peer in peers)
+        stop = asyncio.Event()
+
+        async def serve() -> None:
+            await first.serve_key_change()
+            await first.serve_error(AUTHENTICATION_FAILED)
+            await first.serve_error(MAX_SESSION_KEY_STATUS_REQUESTS_EXCEEDED)
+            await second.serve_key_change()
+            stop.set()
+
+        task = asyncio.create_task(serve())
+        await asyncio.wait_for(runner.run(stop=stop), timeout=5.0)
+        await task
+
     async def test_close_drops_session_keys(self) -> None:
         runner, _, _ = await open_sa_runner()
 
@@ -408,6 +439,20 @@ class TestChallenges:
             await runner.clear_restart()
         await serve
 
+    async def test_malformed_challenge(self) -> None:
+        runner, _, sa = await open_sa_runner()
+
+        async def challenge() -> None:
+            [request] = await sa.peer.read_fragments(1)
+            await sa.peer.send_fragment(auth_response(request[0] & 0x0F, g120(1, b"\x01\x00")))
+
+        serve = asyncio.create_task(challenge())
+        with pytest.raises(AuthenticationError, match="Malformed authentication response"):
+            await runner.clear_restart()
+        await serve
+
+        assert runner._session_keys is not None
+
     async def test_unsupported_mac_algorithm(self) -> None:
         runner, _, sa = await open_sa_runner()
 
@@ -419,6 +464,11 @@ class TestChallenges:
         with pytest.raises(AuthenticationError, match="Unsupported MAC algorithm 1"):
             await runner.clear_restart()
         await serve
+
+        # The fault is the master's own finding, not a sign the outstation lost the keys: no key change follows.
+        serve_next = asyncio.create_task(sa.serve_challenged())
+        await runner.clear_restart()
+        assert (await serve_next)[1] == FunctionCode.WRITE
 
     async def test_unsolicited_during_challenge(self) -> None:
         runner, handler, sa = await open_sa_runner()
@@ -463,7 +513,7 @@ class TestKeyRenewal:
         assert sa.control != old_control
 
     async def test_second_challenge_drops_keys(self) -> None:
-        """Any authentication error renews the keys, not only a g120v7 report."""
+        """A rejected challenge reply renews the keys, like a g120v7 report."""
         runner, _, sa = await open_sa_runner()
 
         async def challenge_twice() -> None:

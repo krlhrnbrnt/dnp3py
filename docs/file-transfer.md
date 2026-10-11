@@ -45,7 +45,7 @@ outstation drops the file when its handle expires.
 
 | Exception | Meaning |
 |---|---|
-| `ValueError` | The name is empty, not ASCII or too long for one fragment, or `permissions` does not fit 16 bits. Nothing was sent. |
+| `ValueError` | The name is empty, not ASCII or too long for one fragment, `permissions` does not fit 16 bits, or the data is 4 GiB or more. Nothing was sent. |
 | `FileTransferError` | The outstation refused a step (`status` holds its code, `text` its optional message), or its answer was missing, malformed or for another request (`status` is None). |
 | `RequestRejectedError` | The outstation's IIN says it did not carry out the request, for example because it has no file transfer. |
 | `AuthenticationError` | Secure Authentication is configured and failed. |

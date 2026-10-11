@@ -50,6 +50,7 @@ _TRANSPORT_STATUS = struct.Struct("<IIB")  # g70v6 up to the optional text
 _REQUEST_HEADER_SIZE = 2  # application control and function code
 _OBJECT_PREFIX_SIZE = 6  # group, variation, qualifier, count and 2-octet object size
 _MAX_U16 = 0xFFFF
+_MAX_U32 = 0xFFFF_FFFF
 _MODE_NULL = 0
 _MODE_WRITE = 2
 
@@ -138,10 +139,13 @@ def build_open_write(
     """OPEN_FILE g70v3 in write mode, which creates the file or replaces one of that name.
 
     Raises:
-        ValueError: `permissions` does not fit 16 bits.
+        ValueError: `permissions` does not fit 16 bits, or `size` 32 bits.
     """
     if not 0 <= permissions <= _MAX_U16:
         msg = f"Permissions {permissions:#o} do not fit 16 bits"
+        raise ValueError(msg)
+    if size > _MAX_U32:
+        msg = f"File size {size} does not fit 32 bits"
         raise ValueError(msg)
     command = _command(
         name,
@@ -239,8 +243,8 @@ def _request(function: FunctionCode, block: ObjectBlock, seq: int) -> RequestFra
 def _only_object(objects: Sequence[ObjectBlock], variation: int) -> bytes:
     found = [block for block in objects if block.header.group == GROUP]
     if not found:
-        # ponytail: an outstation may answer with a null response and report the status later as a g70v4/g70v6
-        # event (deferred status); supporting it means waiting for that event in a class poll.
+        # An outstation may answer with a null response and report the status later as a g70v4/g70v6 event
+        # (deferred status). That is not supported: it would mean waiting for the event in a class poll.
         msg = (
             f"Answer carries no g70v{variation}; an outstation that defers the file status to an event is not supported"
         )
@@ -269,4 +273,5 @@ def _status(code: int) -> FileStatus:
 
 
 def _text(octets: bytes) -> str:
-    return octets.decode("ascii", errors="replace")
+    # The outstation's text reaches exception messages and logs; a control character could forge a log line.
+    return "".join(c if c.isprintable() else "�" for c in octets.decode("ascii", errors="replace"))

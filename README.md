@@ -66,11 +66,14 @@ The runner sets up session keys when it opens, renews them every
 `session_key_change_interval` seconds (10 minutes by default) and answers each
 challenge. A 16-octet update key means AES-128 key wrap, 32 octets AES-256.
 
-- `AuthenticationError`: the outstation refused a request. The request is not
-  resent; the next one sets up new session keys first.
+- `AuthenticationError`: the outstation refused a request, or the master could
+  not answer its challenge. The request is not resent. When the outstation
+  reported an error or rejected the challenge reply, the next request sets up
+  new session keys first.
 - `SessionKeyError`: session keys could not be set up, usually a wrong update
   key or an outstation without Secure Authentication. `run()` raises it rather
-  than reconnecting.
+  than reconnecting when the first key setup fails; once the outstation has
+  taken keys, a failed key change reconnects like a failed link.
 
 Not supported: aggressive mode, remote update key change, user management, and
 authenticating the outstation's own responses.

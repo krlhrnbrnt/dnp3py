@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from dnp3.transport_io.channel import ChannelConnectionError, TcpConfig
+from dnp3.transport_io.channel import ChannelConnectionError, ChannelTimeoutError, TcpConfig
 from dnp3.transport_io.tcp_client import TcpClientChannel
 
 HOST = "127.0.0.1"
@@ -117,3 +117,26 @@ async def test_mutual_tls_round_trip(tmp_path: Path, server_cert: tuple[Path, Pa
 
     async with _tls_echo_server(server_ctx) as port:
         assert await _round_trip(port, client_ctx) == PAYLOAD
+
+
+async def test_stalled_handshake_times_out(server_cert: tuple[Path, Path]) -> None:
+    """The handshake counts against connect_timeout: a peer that accepts TCP but never answers TLS fails the open."""
+    cert, _ = server_cert
+    held: list[asyncio.StreamWriter] = []
+
+    async def accept_and_stall(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    server = await asyncio.start_server(accept_and_stall, HOST, 0)
+    port = server.sockets[0].getsockname()[1]
+    config = TcpConfig(host=HOST, port=port, connect_timeout=0.2, ssl=ssl.create_default_context(cafile=cert))
+    channel = TcpClientChannel(config=config)
+    try:
+        with pytest.raises(ChannelTimeoutError):
+            await asyncio.wait_for(channel.open(), timeout=TIMEOUT)
+        assert channel.is_open is False
+    finally:
+        for writer in held:
+            writer.close()
+        server.close()
+        await server.wait_closed()

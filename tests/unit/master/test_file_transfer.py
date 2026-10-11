@@ -122,6 +122,12 @@ class TestBuilders:
                 b"x", size=0, permissions=permissions, created=DNP3Timestamp(0), max_block=1, request_id=0, seq=0
             )
 
+    def test_open_write_rejects_size_over_32_bits(self) -> None:
+        with pytest.raises(ValueError, match="32 bits"):
+            build_open_write(
+                b"x", size=0x1_0000_0000, permissions=0, created=DNP3Timestamp(0), max_block=1, request_id=0, seq=0
+            )
+
     def test_delete(self) -> None:
         """Mode NULL, no size, no block size: only the name and request ID matter."""
         request = build_delete(b"x", request_id=7, seq=1)
@@ -170,6 +176,12 @@ class TestDecoders:
         obj = struct.pack("<IIHHB", 1, 0, 0, 0, 19) + b"bad \xff"
 
         assert command_status([g70(4, obj)]).text == "bad �"
+
+    def test_status_text_control_characters_replaced(self) -> None:
+        """The text goes into exception messages and logs, where a line break would forge a log line."""
+        obj = struct.pack("<IIB", 1, 0, 19) + b"bad\r\nWARNING forged\x1b[2J"
+
+        assert transport_status([g70(6, obj)]).text == "bad��WARNING forged�[2J"
 
     def test_other_groups_ignored(self) -> None:
         other = ObjectBlock(header=ObjectHeader(group=80, variation=1, qualifier=0x00), data=b"\x07\x07\x00")
