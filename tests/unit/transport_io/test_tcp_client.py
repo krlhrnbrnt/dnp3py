@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import ssl
 import sys
 
 import pytest
@@ -39,6 +40,15 @@ class TestTcpClientChannel:
         channel = TcpClientChannel(config=config)
         assert channel.config.host == "192.168.1.1"
         assert channel.config.port == 30000
+
+    def test_server_hostname_without_ssl_rejected(self) -> None:
+        """server_hostname only applies to TLS, so it is rejected on a plain TCP config."""
+        with pytest.raises(ValueError, match="server_hostname"):
+            TcpConfig(host="192.0.2.10", server_hostname="outstation.test")
+
+    def test_server_hostname_with_ssl_accepted(self) -> None:
+        config = TcpConfig(host="192.0.2.10", ssl=ssl.create_default_context(), server_hostname="outstation.test")
+        assert config.server_hostname == "outstation.test"
 
     def test_local_address_when_not_connected(self) -> None:
         """Local address is None when not connected."""

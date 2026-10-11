@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import datetime
 import ipaddress
+import logging
 import ssl
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -26,10 +27,11 @@ from dnp3.transport_io.tcp_client import TcpClientChannel
 HOST = "127.0.0.1"
 TIMEOUT = 5.0
 PAYLOAD = b"\x05\x64\x05\xc0\x01\x00\x03\x00"
+HOST_SAN = x509.IPAddress(ipaddress.ip_address(HOST))
 
 
-def _self_signed(tmp_path: Path, name: str) -> tuple[Path, Path]:
-    """Write a self-signed certificate valid for 127.0.0.1 and its key; return (cert, key) paths."""
+def _self_signed(tmp_path: Path, name: str, san: x509.GeneralName = HOST_SAN) -> tuple[Path, Path]:
+    """Write a self-signed certificate naming san (127.0.0.1 by default) and its key; return (cert, key) paths."""
     key = ec.generate_private_key(ec.SECP256R1())
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
     now = datetime.datetime.now(datetime.UTC)
@@ -41,7 +43,7 @@ def _self_signed(tmp_path: Path, name: str) -> tuple[Path, Path]:
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(minutes=1))
         .not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address(HOST))]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([san]), critical=False)
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
@@ -71,8 +73,9 @@ async def _tls_echo_server(context: ssl.SSLContext) -> AsyncIterator[int]:
         await server.wait_closed()
 
 
-async def _round_trip(port: int, context: ssl.SSLContext) -> bytes:
-    channel = TcpClientChannel(config=TcpConfig(host=HOST, port=port, connect_timeout=TIMEOUT, ssl=context))
+async def _round_trip(port: int, context: ssl.SSLContext, server_hostname: str | None = None) -> bytes:
+    config = TcpConfig(host=HOST, port=port, connect_timeout=TIMEOUT, ssl=context, server_hostname=server_hostname)
+    channel = TcpClientChannel(config=config)
     async with channel:
         await channel.write_all(PAYLOAD)
         return await asyncio.wait_for(channel.read_exactly(len(PAYLOAD)), timeout=TIMEOUT)
@@ -140,3 +143,41 @@ async def test_stalled_handshake_times_out(server_cert: tuple[Path, Path]) -> No
             writer.close()
         server.close()
         await server.wait_closed()
+
+
+async def test_server_hostname_checks_certificate_name_when_connecting_by_ip(tmp_path: Path) -> None:
+    cert, key = _self_signed(tmp_path, "outstation", x509.DNSName("outstation.test"))
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(cert, key)
+    client_ctx = ssl.create_default_context(cafile=cert)
+
+    async with _tls_echo_server(server_ctx) as port:
+        assert await _round_trip(port, client_ctx, server_hostname="outstation.test") == PAYLOAD
+
+
+async def test_server_hostname_mismatch_fails_to_open(tmp_path: Path) -> None:
+    cert, key = _self_signed(tmp_path, "outstation", x509.DNSName("outstation.test"))
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(cert, key)
+    client_ctx = ssl.create_default_context(cafile=cert)
+
+    async with _tls_echo_server(server_ctx) as port:
+        with pytest.raises(ChannelConnectionError):
+            await _round_trip(port, client_ctx, server_hostname="other.test")
+
+
+async def test_unverified_context_warns_on_open(
+    server_cert: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    cert, key = server_cert
+    server_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    server_ctx.load_cert_chain(cert, key)
+    client_ctx = ssl.create_default_context()
+    client_ctx.check_hostname = False
+    client_ctx.verify_mode = ssl.CERT_NONE
+
+    async with _tls_echo_server(server_ctx) as port:
+        with caplog.at_level(logging.WARNING, logger="dnp3.transport_io.tcp_client"):
+            assert await _round_trip(port, client_ctx) == PAYLOAD
+
+    assert "not authenticated" in caplog.text

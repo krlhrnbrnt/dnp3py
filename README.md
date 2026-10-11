@@ -81,8 +81,8 @@ authenticating the outstation's own responses.
 ## TLS
 
 `MasterTcpRunner` runs over TLS when given an `ssl.SSLContext`. The context
-decides everything: which certificates are trusted, the master's own
-certificate, TLS versions and hostname checking. IEC 62351-3 requires both
+decides which certificates are trusted, the master's own certificate and the
+TLS versions. IEC 62351-3 requires both
 ends to present a certificate, and 19999 is the usual DNP3-over-TLS port:
 
 ```python
@@ -93,17 +93,25 @@ from dnp3.master import Master, MasterConfig, MasterTcpRunner
 context = ssl.create_default_context(cafile="outstation-ca.pem")
 context.load_cert_chain("master.pem", "master.key")
 context.minimum_version = ssl.TLSVersion.TLSv1_2
-# Outstations are often reached by IP with a certificate that does not name it:
-# context.check_hostname = False
 
 runner = MasterTcpRunner(master=Master(config=MasterConfig(outstation_address=10)),
-                         host="192.0.2.10", port=19999, ssl=context)
+                         host="192.0.2.10", port=19999, ssl=context,
+                         server_hostname="rtu10.example.net")
 ```
+
+The outstation's certificate is checked against `host` unless
+`server_hostname` is given. When you reach an outstation by IP and its
+certificate names it by DNS name, set `server_hostname` to that name rather
+than setting `context.check_hostname = False`. Usually one utility CA signs
+every device certificate, so without the name check any stolen device
+certificate and key can impersonate any outstation. A context with
+`verify_mode = ssl.CERT_NONE` logs a warning on each open: the link is then
+encrypted but not authenticated.
 
 A failed handshake, including a rejected certificate, raises
 `ChannelConnectionError` from `open()`; `run()` retries it like any other
-failed connection. `TcpClientChannel` takes the same context as
-`TcpConfig.ssl`. The outstation side and UDP have no TLS support.
+failed connection. `TcpClientChannel` takes the same settings as
+`TcpConfig.ssl` and `TcpConfig.server_hostname`. The outstation side and UDP have no TLS support.
 
 ## Quick Start
 

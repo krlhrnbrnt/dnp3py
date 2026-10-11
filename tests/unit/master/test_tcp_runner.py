@@ -331,6 +331,24 @@ class TestLifecycle:
         assert isinstance(channel, TcpClientChannel)
         assert channel.config.ssl is context
 
+    def test_created_channel_carries_server_hostname(self) -> None:
+        context = ssl.create_default_context()
+        master = Master(config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR))
+        runner = MasterTcpRunner(
+            master=master, host="192.0.2.10", port=19999, ssl=context, server_hostname="outstation.test"
+        )
+
+        channel = runner._create_channel()
+
+        assert isinstance(channel, TcpClientChannel)
+        assert channel.config.server_hostname == "outstation.test"
+
+    def test_server_hostname_without_ssl_rejected(self) -> None:
+        """The runner rejects server_hostname without a TLS context when built, not on the first open."""
+        master = Master(config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR))
+        with pytest.raises(ValueError, match="server_hostname"):
+            MasterTcpRunner(master=master, host="192.0.2.10", server_hostname="outstation.test")
+
     async def test_close_leaves_injected_channel_open(self) -> None:
         """A channel the runner did not open is not closed by it."""
         channel_a, _ = create_channel_pair()

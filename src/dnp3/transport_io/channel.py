@@ -269,6 +269,9 @@ class TcpConfig(ChannelConfig):
             aborting the connection.
         ssl: TLS context for a client connection; None means plain TCP. The
             TLS handshake counts against `connect_timeout`. `TcpServer` ignores it.
+        server_hostname: Name the outstation's certificate must carry, in place
+            of `host`. Set it when connecting by IP to an outstation whose
+            certificate names it by DNS name. Requires `ssl`.
     """
 
     host: str = "127.0.0.1"
@@ -280,6 +283,12 @@ class TcpConfig(ChannelConfig):
     keepalive_count: int = 3
     close_timeout: float = 1.0
     ssl: SSLContext | None = None
+    server_hostname: str | None = None
+
+    def __post_init__(self) -> None:
+        # asyncio.open_connection rejects server_hostname without ssl; fail here rather than on the first open.
+        if self.server_hostname is not None and self.ssl is None:
+            raise ValueError("server_hostname requires an ssl context")
 
 
 @dataclass

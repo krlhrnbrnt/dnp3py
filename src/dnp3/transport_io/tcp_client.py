@@ -5,7 +5,9 @@ DNP3 outstations or other TCP-based DNP3 endpoints.
 """
 
 import asyncio
+import logging
 import socket
+import ssl
 from dataclasses import dataclass, field, replace
 
 from dnp3.transport_io.channel import (
@@ -17,6 +19,8 @@ from dnp3.transport_io.channel import (
     ChannelTimeoutError,
     TcpConfig,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def configure_socket(sock: socket.socket, config: TcpConfig) -> None:
@@ -262,6 +266,13 @@ class TcpClientChannel(StreamIO):
             return
 
         self._state = ChannelState.OPENING
+        if self.config.ssl is not None and self.config.ssl.verify_mode == ssl.CERT_NONE:
+            # Allowed because test setups use such contexts, but anyone on the path can pose as the outstation.
+            logger.warning(
+                "TLS to %s:%d does not verify the outstation's certificate: encrypted but not authenticated",
+                self.config.host,
+                self.config.port,
+            )
 
         try:
             self.reader, self.writer = await asyncio.wait_for(
@@ -269,6 +280,7 @@ class TcpClientChannel(StreamIO):
                     host=self.config.host,
                     port=self.config.port,
                     ssl=self.config.ssl,
+                    server_hostname=self.config.server_hostname,
                 ),
                 timeout=self.config.connect_timeout,
             )
