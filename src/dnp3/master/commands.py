@@ -33,6 +33,8 @@ ANALOG_OUTPUT_DOUBLE_VARIATION = 4  # Double float
 QUALIFIER_1BYTE_INDEX = 0x17  # 1-byte count, 1-byte index prefix
 QUALIFIER_2BYTE_INDEX = 0x28  # 2-byte count, 2-byte index prefix
 MAX_1BYTE_INDEX = 255  # Maximum index or count for 1-byte qualifier
+MAX_2BYTE_INDEX = 65535
+MAX_UINT32 = 0xFFFFFFFF
 
 
 class AnalogOutputVariation(IntEnum):
@@ -89,6 +91,15 @@ class ControlOperation:
     analog_variation: AnalogOutputVariation = AnalogOutputVariation.INT32
 
     def __post_init__(self) -> None:
+        # Widths of the 0x28 index prefix and the g12v1 count and on/off time fields (IEEE 1815-2012 A.8.1).
+        for name, value, limit in (
+            ("index", self.index, MAX_2BYTE_INDEX),
+            ("count", self.count, MAX_1BYTE_INDEX),
+            ("on_time", self.on_time, MAX_UINT32),
+            ("off_time", self.off_time, MAX_UINT32),
+        ):
+            if not 0 <= value <= limit:
+                raise ValueError(f"{name} must be 0..{limit}, got {value}")
         if self.is_analog:
             self._analog_body()
 

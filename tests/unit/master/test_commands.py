@@ -677,6 +677,34 @@ class TestAnalogValueChecks:
             ControlOperation(index=0, analog_value=12.7, is_analog=True)
 
 
+class TestControlFieldChecks:
+    """A field the wire format cannot carry is refused when the operation is created."""
+
+    @pytest.mark.parametrize(
+        "fields",
+        [
+            {"count": 256},
+            {"count": -1},
+            {"on_time": -1},
+            {"off_time": 2**32},
+            {"index": -1},
+            {"index": 70000},
+        ],
+        ids=["count-256", "count-neg", "on-neg", "off-2^32", "index-neg", "index-70000"],
+    )
+    def test_out_of_range_rejected_on_creation(self, fields: dict[str, int]) -> None:
+        with pytest.raises(ValueError):
+            ControlOperation(**{"index": 0, **fields})
+
+    def test_analog_index_checked(self) -> None:
+        with pytest.raises(ValueError):
+            CommandBuilder().add_analog(70000, 1)
+
+    def test_limits_accepted(self) -> None:
+        op = ControlOperation(index=65535, count=255, on_time=2**32 - 1, off_time=2**32 - 1)
+        assert DirectOperateTask(operations=[op]).build_request().objects[0].header.qualifier == 0x28
+
+
 class TestPrefixedBlock:
     """Tests for the index-prefixed block encoder."""
 
