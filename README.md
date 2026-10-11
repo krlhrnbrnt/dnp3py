@@ -19,7 +19,7 @@ MESA IEEE 1815.2 DER outstation simulator introduced in v0.2.0.
   subset for RTU-class SCADA use; see [Protocol Conformance](#protocol-conformance)
   for the request rows not yet implemented
 - **Async I/O** - Built on asyncio for efficient network communication
-- **TCP and UDP masters** - `MasterTcpRunner` and `MasterUdpRunner` share one
+- **TCP, TLS and UDP masters** - `MasterTcpRunner` (optionally over [TLS](#tls)) and `MasterUdpRunner` share one
   API; see [DNP3 master over UDP](docs/udp-master.md)
 - **Type Safe** - Full type annotations with strict mypy compliance
 - **Well Tested** - unit, integration and hypothesis property tests with a 95% coverage gate
@@ -72,6 +72,33 @@ challenge. A 16-octet update key means AES-128 key wrap, 32 octets AES-256.
 
 Not supported: aggressive mode, remote update key change, user management, and
 authenticating the outstation's own responses.
+
+## TLS
+
+`MasterTcpRunner` runs over TLS when given an `ssl.SSLContext`. The context
+decides everything: which certificates are trusted, the master's own
+certificate, TLS versions and hostname checking. IEC 62351-3 requires both
+ends to present a certificate, and 19999 is the usual DNP3-over-TLS port:
+
+```python
+import ssl
+
+from dnp3.master import Master, MasterConfig, MasterTcpRunner
+
+context = ssl.create_default_context(cafile="outstation-ca.pem")
+context.load_cert_chain("master.pem", "master.key")
+context.minimum_version = ssl.TLSVersion.TLSv1_2
+# Outstations are often reached by IP with a certificate that does not name it:
+# context.check_hostname = False
+
+runner = MasterTcpRunner(master=Master(config=MasterConfig(outstation_address=10)),
+                         host="192.0.2.10", port=19999, ssl=context)
+```
+
+A failed handshake, including a rejected certificate, raises
+`ChannelConnectionError` from `open()`; `run()` retries it like any other
+failed connection. `TcpClientChannel` takes the same context as
+`TcpConfig.ssl`. The outstation side and UDP have no TLS support.
 
 ## Quick Start
 

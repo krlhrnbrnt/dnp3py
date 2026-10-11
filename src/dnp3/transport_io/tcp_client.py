@@ -268,6 +268,7 @@ class TcpClientChannel(StreamIO):
                 asyncio.open_connection(
                     host=self.config.host,
                     port=self.config.port,
+                    ssl=self.config.ssl,
                 ),
                 timeout=self.config.connect_timeout,
             )

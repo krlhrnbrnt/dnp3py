@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
 import struct
 import sys
 import time
@@ -55,6 +56,7 @@ from dnp3.objects.time import TimeAndDate, TimeAndDateRecorded
 from dnp3.transport.segment import TransportSegment
 from dnp3.transport_io.channel import ChannelError
 from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
+from dnp3.transport_io.tcp_client import TcpClientChannel
 from tests.unit.master.test_command_status import echo
 
 MASTER_ADDR = 3
@@ -317,6 +319,17 @@ class TestLifecycle:
 
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(channel_b.read(4096), timeout=0.2)
+
+    def test_created_channel_carries_tls_context(self) -> None:
+        """The runner's TLS context reaches the TCP channel it creates."""
+        context = ssl.create_default_context()
+        master = Master(config=MasterConfig(address=MASTER_ADDR, outstation_address=OUTSTATION_ADDR))
+        runner = MasterTcpRunner(master=master, host="192.0.2.10", port=19999, ssl=context)
+
+        channel = runner._create_channel()
+
+        assert isinstance(channel, TcpClientChannel)
+        assert channel.config.ssl is context
 
     async def test_close_leaves_injected_channel_open(self) -> None:
         """A channel the runner did not open is not closed by it."""

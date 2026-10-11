@@ -7,6 +7,7 @@ bytes between DNP3 master and outstation implementations.
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
+from ssl import SSLContext
 from typing import Protocol, runtime_checkable
 
 
@@ -266,6 +267,8 @@ class TcpConfig(ChannelConfig):
         keepalive_count: Keepalive probe count.
         close_timeout: Seconds close() waits for unsent bytes to drain before
             aborting the connection.
+        ssl: TLS context for a client connection; None means plain TCP. The
+            TLS handshake counts against `connect_timeout`. `TcpServer` ignores it.
     """
 
     host: str = "127.0.0.1"
@@ -276,6 +279,7 @@ class TcpConfig(ChannelConfig):
     keepalive_interval: float = 10.0
     keepalive_count: int = 3
     close_timeout: float = 1.0
+    ssl: SSLContext | None = None
 
 
 @dataclass

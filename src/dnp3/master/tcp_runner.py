@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from ssl import SSLContext
 
 from dnp3.master.runner import (
     LinkError,
@@ -48,11 +49,13 @@ class MasterTcpRunner(MasterRunner):
     Attributes:
         host: Outstation host to connect to.
         port: Outstation TCP port.
+        ssl: TLS context for the connection; None means plain TCP.
     """
 
     host: str = "127.0.0.1"
     port: int = 20000
+    ssl: SSLContext | None = None
 
     def _create_channel(self) -> Channel:
         logger.info("Master connecting to %s:%d", self.host, self.port)
-        return TcpClientChannel(config=TcpConfig(host=self.host, port=self.port))
+        return TcpClientChannel(config=TcpConfig(host=self.host, port=self.port, ssl=self.ssl))
