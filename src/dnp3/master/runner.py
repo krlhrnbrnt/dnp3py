@@ -198,7 +198,8 @@ class MasterRunner:
             response parsing, and the SOE handler values are reported to.
         channel: Channel to use. When None, `open()` builds one with
             `_create_channel()`, which a transport subclass provides.
-        response_timeout: Seconds to wait for a response. None uses the
+        response_timeout: Seconds to wait for each response fragment, counted
+            from the request or from the previous fragment. None uses the
             master's `MasterConfig.response_timeout`.
         link_reset: Whether to reset the data link on open.
         poll_retry_delay: Seconds `run_polls()` waits before retrying a
@@ -319,6 +320,10 @@ class MasterRunner:
         An injected channel is left open for its owner to close, but the
         runner's own state is dropped either way: a reused runner must not
         reassemble the next connection's bytes onto the last one's remnants.
+        `run()` is the exception: it closes an injected channel before each
+        reconnect, so the channel must be one that `open()` can reopen.
+        `UdpChannel` and `TcpClientChannel` can; a `SimulatorChannel` loses its
+        peer on close and cannot.
         """
         try:
             if self.channel is not None and self._owns_channel:

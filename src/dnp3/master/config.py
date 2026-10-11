@@ -51,7 +51,8 @@ class MasterConfig:
         address: DNP3 address of this master.
         outstation_address: Address of the outstation to communicate with.
         max_fragment_size: Maximum fragment size in bytes.
-        response_timeout: Timeout waiting for responses (seconds).
+        response_timeout: Seconds to wait for each response fragment, counted
+            from the request or from the previous fragment.
         confirm_timeout: Timeout waiting for confirmations (seconds).
         enable_unsolicited: Accept unsolicited responses.
         startup_integrity_poll: Perform integrity poll on startup.
