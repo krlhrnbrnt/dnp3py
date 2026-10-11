@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import sys
 
 import pytest
 
@@ -527,6 +528,7 @@ class TestTcpClientStatistics:
             await server.wait_closed()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Proactor loop fails or hangs closing a stalled transport")
 class TestCloseIsBounded:
     """close() finishes even when the peer has stopped reading.
 
