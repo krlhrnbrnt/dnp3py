@@ -45,6 +45,7 @@ from dnp3.master.runner import (
     TimeSyncError,
 )
 from dnp3.master.state import MasterState, MasterStateManager
+from dnp3.master.sync_master import SyncMaster
 from dnp3.master.tcp_runner import MasterTcpRunner
 from dnp3.master.udp_runner import MasterUdpRunner
 
@@ -86,6 +87,7 @@ __all__ = [
     "ResponseTimeoutError",
     "SOEHandler",
     "SelectTask",
+    "SyncMaster",
     "TimeSyncError",
     "TimeSyncMethod",
     "TimestampQuality",

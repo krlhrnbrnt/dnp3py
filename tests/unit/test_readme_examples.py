@@ -128,3 +128,38 @@ class TestReadmeMasterQuickStart:
             serve_task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(serve_task, timeout=POLL_TIMEOUT)
+
+
+class TestReadmeSyncMaster:
+    """The README's Synchronous master block, against the Outstation block's server."""
+
+    async def test_reads_values_and_reports_each_commanded_point(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The block prints a polled value, then one status line per commanded point.
+
+        The Quick Start outstation has no outputs, so both points come back
+        NOT_SUPPORTED: the line format is what the README promises.
+        """
+        registry = _RunnerRegistry()
+        monkeypatch.setattr("dnp3.outstation.OutstationTcpRunner", registry)
+
+        readme_text = README_PATH.read_text()
+        outstation_main = _load_main(_extract_code_block(readme_text, "### Outstation (Server)"), port=0)
+        serve_task: asyncio.Task[None] = asyncio.create_task(outstation_main())
+
+        try:
+            _host, port = await _await_bind(serve_task, registry)
+
+            source = _extract_code_block(readme_text, "### Synchronous master")
+            patched = source.replace(f"port={README_FIXED_PORT}", f"port={port}")
+            # SyncMaster refuses a running loop, so the block runs on a worker
+            # thread, as it would in a plain script.
+            code = compile(patched, "<readme block>", "exec")
+            await asyncio.wait_for(asyncio.to_thread(exec, code, {}), timeout=POLL_TIMEOUT)
+
+            assert capsys.readouterr().out == "42.0\n0 NOT_SUPPORTED\n1 NOT_SUPPORTED\n"
+        finally:
+            serve_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(serve_task, timeout=POLL_TIMEOUT)

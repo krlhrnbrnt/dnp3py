@@ -106,6 +106,36 @@ async with MasterUdpRunner(master=master, udp=UdpConfig(remote_host="127.0.0.1",
     await runner.integrity_poll()
 ```
 
+### Synchronous master
+
+`SyncMaster` wraps a runner for code without an event loop. Its methods block and return what the runner's
+coroutines return:
+
+```python
+from dnp3.master import CommandBuilder, DefaultSOEHandler, Master, MasterConfig, MasterTcpRunner, SyncMaster
+
+handler = DefaultSOEHandler()
+master = Master(handler=handler, config=MasterConfig(address=2, outstation_address=1))
+
+with SyncMaster(MasterTcpRunner(master=master, host="127.0.0.1", port=20000)) as sync:
+    # Read: an integrity poll hands every value to the handler.
+    sync.integrity_poll()
+    print(handler.analog_inputs[0].value)   # 42.0
+
+    # Write: latch binary output 0 on and set analog output 1 to 50.
+    command = CommandBuilder().latch_on(0).add_analog(1, 50).build_direct_operate()
+    result = sync.direct_operate(command)
+    for point in result.points:
+        print(point.index, point.status.name)
+```
+
+Each commanded point reports its own status; `result.is_success` is True only when all of them succeeded. The Quick
+Start outstation has no outputs, so it answers `NOT_SUPPORTED` for both. For select-before-operate, build the command
+with `build_select()` and pass it to `sync.select_and_operate()`.
+
+`close()` (or leaving the `with`) is final. `run()` and `run_polls()` stay async-only. Inside a running event loop,
+such as Jupyter, `await` the runner directly instead.
+
 ### Long-running master with reconnect
 
 `run()` opens the runner, runs the configured startup sequence, then polls on
