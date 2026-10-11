@@ -267,7 +267,8 @@ class MasterRunner:
                 replace the reassembler and re-send RESET_LINK_STATE underneath
                 any in-flight request. Also raised when no channel was supplied
                 and the runner cannot build one.
-            LinkError: The link reset could not be written.
+            LinkError: The channel could not be opened, or the link reset could
+                not be written.
         """
         # `_reassembler`, not `is_open`: an injected channel is often already
         # open before the runner touches it, and opening the runner over it is
@@ -286,7 +287,11 @@ class MasterRunner:
 
         try:
             if not self.channel.is_open:
-                await self.channel.open()
+                try:
+                    await self.channel.open()
+                except ChannelError as exc:
+                    msg = f"Could not open the channel: {exc}"
+                    raise LinkError(msg) from exc
 
             # Bound reassembly by the master's own fragment cap so a peer that
             # never sets FIN cannot exhaust memory.
@@ -971,7 +976,7 @@ class MasterRunner:
                     return
                 except (RequestRejectedError, TimeSyncError):
                     raise
-                except (MasterRunnerError, ChannelError) as exc:
+                except MasterRunnerError as exc:
                     delay = min(delay, self.reconnect_max_delay)
                     logger.warning("Outstation link down, reconnecting in %g s: %s", delay, exc)
                     await self.close()

@@ -20,7 +20,7 @@ from dnp3.core.flags import IIN
 from dnp3.master.config import MasterConfig
 from dnp3.master.master import Master
 from dnp3.master.polling import IntegrityPollTask
-from dnp3.master.runner import LinkResetPolicy, MasterRunner, RequestRejectedError
+from dnp3.master.runner import LinkError, LinkResetPolicy, MasterRunner, RequestRejectedError
 from dnp3.transport_io.channel import Channel, ChannelConnectionError
 from dnp3.transport_io.simulator import SimulatorChannel, create_channel_pair
 from tests.unit.master.test_tcp_runner import (
@@ -112,6 +112,17 @@ async def stop_after_startup(peer: FakeOutstation, stop: asyncio.Event) -> list[
 @pytest.fixture(autouse=True)
 def _log_warnings(caplog: pytest.LogCaptureFixture) -> None:
     caplog.set_level(logging.WARNING, logger="dnp3.master.runner")
+
+
+class TestOpen:
+    async def test_refused_connection_raises_link_error(self) -> None:
+        runner = make_runner(RefusingChannel())
+
+        with pytest.raises(LinkError) as caught:
+            await runner.open()
+
+        assert isinstance(caught.value.__cause__, ChannelConnectionError)
+        assert runner.channel is None
 
 
 class TestRun:
