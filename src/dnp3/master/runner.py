@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
@@ -232,6 +233,8 @@ class MasterRunner:
     _contenders: int = field(default=0, init=False, repr=False)
     # IIN reactions the outstation refused; `run_polls()` skips them until `open()`.
     _disabled_actions: IINAction = field(default=IINAction(0), init=False, repr=False)
+    # Monotonic time before which `run_polls()` does not retry a timed-out IIN reaction.
+    _retry_at: dict[IINAction, float] = field(default_factory=dict, init=False, repr=False)
     # Event-loop time the link parser last produced a frame, from any address.
     # A timeout reports it, because "the link went silent" and "the outstation
     # answered something else" are different outstation faults.
@@ -276,6 +279,7 @@ class MasterRunner:
             raise MasterRunnerError(msg)
 
         self._disabled_actions = IINAction(0)
+        self._retry_at.clear()
         if self.channel is None:
             self.channel = self._create_channel()
             self._owns_channel = True
@@ -868,7 +872,8 @@ class MasterRunner:
         4. ENABLE_UNSOLICITED for classes 1-3, after DEVICE_RESTART.
 
         `MasterConfig` says which bits demand which actions. An action that
-        fails like a poll is retried like one. One the outstation rejects is
+        fails like a poll is retried after `poll_retry_delay`, and polls that
+        fall due meanwhile still run. One the outstation rejects is
         logged and not taken again until the runner is reopened. Demands the
         reactions' own responses raise are dropped, so an outstation that
         never clears a bit gets its reactions once per scheduled poll, not
@@ -891,15 +896,15 @@ class MasterRunner:
         while not stop.is_set():
             action = next(iter(self._actionable()), None)
             if action is not None:
-                await self._react(action, stop)
+                await self._react(action)
                 continue
 
             task = self.master.scheduler.get_next_task()
             if task is None:
-                wait = self.master.scheduler.get_time_until_next()
-                if wait is None:
+                waits = [w for w in (self.master.scheduler.get_time_until_next(), self._retry_wait()) if w is not None]
+                if not waits:
                     return
-                await self._idle(max(wait, 0.0), stop, wake_on_demand=True)
+                await self._idle(max(min(waits), 0.0), stop, wake_on_demand=True)
                 continue
 
             try:
@@ -964,7 +969,7 @@ class MasterRunner:
         finally:
             await self.close()
 
-    async def _react(self, action: IINAction, stop: asyncio.Event) -> None:
+    async def _react(self, action: IINAction) -> None:
         """Take one IIN reaction for `run_polls()`."""
         demanded = self.master.pending_actions
         try:
@@ -983,9 +988,12 @@ class MasterRunner:
             logger.warning("%s refused, not repeated until the runner is reopened: %s", action.name, exc)
             self._disabled_actions |= action
         except MasterRunnerError as exc:
+            # Deferred rather than waited out here, so scheduled polls keep
+            # running while an outstation fails to answer the reaction.
             logger.warning("%s failed, retrying in %.1f s: %s", action.name, self.poll_retry_delay, exc)
-            await self._idle(self.poll_retry_delay, stop)
+            self._retry_at[action] = time.monotonic() + self.poll_retry_delay
             return
+        self._retry_at.pop(action, None)
         # Demands the action's own responses raised are dropped with it: an
         # integrity poll answered with EVENT_BUFFER_OVERFLOW still set does not
         # demand another, and after a refused clear, the follow-ups' answers
@@ -994,8 +1002,19 @@ class MasterRunner:
         self.master.complete_action(action | (self.master.pending_actions & ~demanded))
 
     def _actionable(self) -> IINAction:
-        """Pending IIN reactions `run_polls()` has not given up on."""
-        return self.master.pending_actions & ~self._disabled_actions
+        """Pending IIN reactions `run_polls()` has neither given up on nor deferred."""
+        now = time.monotonic()
+        deferred = IINAction(0)
+        for action, at in self._retry_at.items():
+            if at > now:
+                deferred |= action
+        return self.master.pending_actions & ~(self._disabled_actions | deferred)
+
+    def _retry_wait(self) -> float | None:
+        """Seconds until the next deferred IIN reaction may be retried, if one is pending."""
+        now = time.monotonic()
+        pending = self.master.pending_actions
+        return min((at - now for action, at in self._retry_at.items() if action in pending), default=None)
 
     async def _idle(self, timeout: float, stop: asyncio.Event, *, wake_on_demand: bool = False) -> None:
         """Handle unsolicited responses until `timeout` elapses or `stop` is set.

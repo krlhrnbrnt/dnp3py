@@ -2953,6 +2953,25 @@ class TestIINReactions:
         assert ignored[1] == retried[1] == FunctionCode.WRITE
         assert not runner.master.pending_actions
 
+    async def test_timed_out_action_does_not_starve_polls(self) -> None:
+        """Polls falling due while a timed-out action waits to be retried still run."""
+        runner, peer, _ = await open_runner(
+            response_timeout=0.1,
+            poll_retry_delay=3600.0,
+            startup_integrity_poll=False,
+            enable_unsolicited_on_startup=False,
+        )
+        class_poll_scheduler(runner, interval=0.01)
+        stop = asyncio.Event()
+        responder = answer_with_iin(peer, [IIN.DEVICE_RESTART, None, None], stop, ignore=frozenset({1}))
+
+        await asyncio.wait_for(runner.run_polls(stop=stop), timeout=2.0)
+        class_poll, ignored, resumed = await responder
+
+        assert ignored[1] == FunctionCode.WRITE
+        assert resumed[1:] == class_poll[1:]
+        assert runner.master.pending_actions == IINAction.CLEAR_RESTART
+
     async def test_rejected_action_not_repeated(self, caplog: pytest.LogCaptureFixture) -> None:
         """An outstation that will not clear IIN1.7 is not asked again until the runner is reopened."""
         runner, peer, _ = await open_runner(startup_integrity_poll=False, enable_unsolicited_on_startup=False)
